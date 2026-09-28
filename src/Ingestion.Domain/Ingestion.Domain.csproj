@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The functional core: no package references, no I/O, no framework dependencies. -->
+</Project>

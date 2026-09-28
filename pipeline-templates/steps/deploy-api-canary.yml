@@ -1,0 +1,62 @@
+# Example contents of the contoso/pipeline-templates repository (pinned by tag in azure-pipelines.yml).
+# Progressive release: deploy to the canary slot, route a share of traffic, watch, then promote.
+parameters:
+- name: package
+  type: string
+- name: azureSubscription
+  type: string
+  default: $(azureSubscription)
+- name: appName
+  type: string
+  default: $(appName)
+- name: canaryPercent
+  type: number
+  default: 10
+- name: observeMinutes
+  type: number
+  default: 15
+
+steps:
+- template: deploy-api.yml
+  parameters:
+    package: ${{ parameters.package }}
+    azureSubscription: ${{ parameters.azureSubscription }}
+    appName: ${{ parameters.appName }}
+    slot: canary
+
+- task: AzureCLI@2
+  displayName: Route ${{ parameters.canaryPercent }}% of traffic to canary
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: >
+      az webapp traffic-routing set
+      --name ${{ parameters.appName }}
+      --resource-group $(resourceGroup)
+      --distribution canary=${{ parameters.canaryPercent }}
+
+# While traffic is split, Azure Monitor alerts on error rate and p99 latency are the signal.
+# If they fire, cancel the run and clear routing; nothing has been promoted yet.
+- script: sleep $(( ${{ parameters.observeMinutes }} * 60 ))
+  displayName: Observe canary for ${{ parameters.observeMinutes }} minutes
+
+- task: AzureAppServiceManage@0
+  displayName: Promote canary to production
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    Action: Swap Slots
+    WebAppName: ${{ parameters.appName }}
+    ResourceGroupName: $(resourceGroup)
+    SourceSlot: canary
+
+- task: AzureCLI@2
+  displayName: Clear traffic routing
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: >
+      az webapp traffic-routing clear
+      --name ${{ parameters.appName }}
+      --resource-group $(resourceGroup)

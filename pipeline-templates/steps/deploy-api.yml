@@ -1,0 +1,26 @@
+# Example contents of the contoso/pipeline-templates repository (pinned by tag in azure-pipelines.yml).
+# Deploys the published API package to an App Service slot.
+parameters:
+- name: package
+  type: string
+- name: azureSubscription
+  type: string
+  default: $(azureSubscription)
+- name: appName
+  type: string
+  default: $(appName)
+- name: slot
+  type: string
+  default: staging
+
+steps:
+- task: AzureWebApp@1
+  displayName: Deploy ${{ parameters.appName }} to slot ${{ parameters.slot }}
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    appType: webAppLinux
+    appName: ${{ parameters.appName }}
+    deployToSlotOrASE: true
+    resourceGroupName: $(resourceGroup)
+    slotName: ${{ parameters.slot }}
+    package: ${{ parameters.package }}

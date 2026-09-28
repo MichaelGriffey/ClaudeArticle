@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <!-- Local development secrets, including the signing key that dotnet user-jwts creates. -->
+    <UserSecretsId>ingestion-api-7c1e2b9a-4f5d-4a8e-9b3c-2d6f1a0e8c47</UserSecretsId>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Ingestion.Domain/Ingestion.Domain.csproj" />
+  </ItemGroup>
+</Project>

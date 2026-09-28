@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Shared test host and fakes for the integration and acceptance suites. Not a test project. -->
+  <PropertyGroup>
+    <IsTestProject>false</IsTestProject>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Ingestion.Api/Ingestion.Api.csproj" />
+  </ItemGroup>
+</Project>

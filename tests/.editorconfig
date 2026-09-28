@@ -1,0 +1,5 @@
+[*.cs]
+# Test names read as specifications: Limits_are_inclusive
+dotnet_diagnostic.CA1707.severity = none
+# Test frameworks invoke test methods on instances
+dotnet_diagnostic.CA1822.severity = none

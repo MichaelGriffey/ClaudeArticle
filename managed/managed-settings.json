@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "disableAutoMode": "disable",
+    "disableBypassPermissionsMode": "disable",
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)"
+    ]
+  },
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [
+    { "serverUrl": "https://mcp.contoso.internal/azure-devops/*" }
+  ],
+  "strictKnownMarketplaces": [
+    { "source": "github", "repo": "contoso/claude-plugins" }
+  ],
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": ["api.nuget.org", "github.com", "dev.azure.com"],
+      "allowManagedDomainsOnly": true
+    }
+  },
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otel.contoso.internal:4317"
+  },
+  "cleanupPeriodDays": 7
+}

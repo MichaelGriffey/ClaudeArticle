@@ -1,0 +1,113 @@
+# azure-pipelines.yml (checked into the GitHub repo, reviewed like code)
+trigger:
+  branches:
+    include: [ main ]
+pr:
+  branches:
+    include: [ main ]
+
+resources:
+  repositories:
+  - repository: templates
+    type: github
+    name: contoso/pipeline-templates
+    endpoint: github-contoso          # GitHub service connection
+    ref: refs/tags/v3.2.0             # pinned; template changes ship as reviewed releases
+
+variables:
+  config: Release
+  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+
+stages:
+- stage: Build
+  jobs:
+  - job: BuildAndVerify
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: UseDotNet@2
+      inputs:
+        useGlobalJson: true           # SDK pinned in global.json
+    - script: dotnet tool restore && dotnet restore --locked-mode
+      displayName: Restore from lock files
+    - script: dotnet format --verify-no-changes --no-restore
+      displayName: Formatting gate
+    - script: dotnet build -c $(config) --no-restore -warnaserror
+      displayName: Build, warnings as errors
+    - task: DotNetCoreCLI@2
+      displayName: Unit and property tests
+      inputs:
+        command: test
+        projects: tests/**/*.UnitTests.csproj
+        arguments: -c $(config) --no-build --collect "XPlat Code Coverage"
+    - script: dotnet stryker --break-at 80
+      displayName: Mutation gate (score of 80 or better)
+      workingDirectory: tests/Ingestion.UnitTests
+    - task: DotNetCoreCLI@2
+      displayName: Integration and in-process acceptance tests
+      inputs:
+        command: test
+        projects: |
+          tests/**/*.IntegrationTests.csproj
+          tests/**/*.ContractTests.csproj
+          tests/**/*.AcceptanceTests.csproj
+        arguments: -c $(config) --no-build
+    - task: PublishCodeCoverageResults@2
+      condition: succeededOrFailed()
+      inputs:
+        summaryFileLocation: $(Agent.TempDirectory)/**/coverage.cobertura.xml
+    - script: dotnet publish src/Ingestion.Api -c $(config) --no-build -o $(Build.ArtifactStagingDirectory)/api
+      displayName: Publish once; the same bits are promoted everywhere
+    - publish: $(Build.ArtifactStagingDirectory)/api
+      artifact: api
+
+- stage: Staging
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables.isMain, true))
+  jobs:
+  - deployment: Deploy
+    environment: ingestion-staging
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: steps/deploy-api.yml@templates
+            parameters:
+              package: $(Pipeline.Workspace)/api
+  - job: Acceptance
+    dependsOn: Deploy
+    pool:
+      vmImage: ubuntu-latest
+    variables:
+    - group: ingestion-staging        # provides stagingBaseUrl and stagingAccessToken
+    steps:
+    - task: UseDotNet@2
+      inputs:
+        useGlobalJson: true
+    - task: DotNetCoreCLI@2
+      displayName: Gherkin acceptance suite against staging
+      inputs:
+        command: test
+        projects: tests/**/*.AcceptanceTests.csproj
+        arguments: --filter "Category!=in-process"
+      env:
+        INGESTION_BASE_URL: $(stagingBaseUrl)
+        INGESTION_ACCESS_TOKEN: $(stagingAccessToken)   # secret variable in the group
+
+- stage: Production
+  dependsOn: Staging
+  condition: and(succeeded(), eq(variables.isMain, true))
+  jobs:
+  - deployment: Release
+    environment: ingestion-prod       # approvals, business hours, health checks live here
+    pool:
+      vmImage: ubuntu-latest
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: steps/deploy-api-canary.yml@templates
+            parameters:
+              package: $(Pipeline.Workspace)/api

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": ["Bash(dotnet build *)", "Bash(dotnet test *)", "Bash(dotnet format *)",
+              "Bash(git status)", "Bash(git diff *)", "Bash(git add *)", "Bash(git commit *)",
+              "Bash(git switch *)", "Bash(git rebase *)"],
+    "ask":   ["Bash(git push *)", "Bash(gh pr create *)"],
+    "deny":  ["Bash(git push --force *)", "Bash(git push -f *)", "Bash(git reset --hard *)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit *)",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/verify-before-commit.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
