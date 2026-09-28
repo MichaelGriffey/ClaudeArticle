@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using Ingestion.AcceptanceTests.Support;
+using Ingestion.Testing;
 using Reqnroll;
 using Xunit;
 
@@ -143,4 +144,13 @@ public sealed class SensorReadingSteps(IngestionDriver driver)
 
     [Then(@"^the reading is not partially persisted$")]
     public void ThenNothingIsPersisted() => Assert.Empty(driver.Store.Rows);
+
+    [Then(@"^exactly one audit record names the caller and the reading$")]
+    public void ThenOneAuditRecordNamesTheCaller()
+    {
+        var audit = Assert.Single(driver.Store.AuditTrail);
+        Assert.Equal(TestAuthHandler.SubjectId, audit.SubjectId);
+        Assert.Equal((Sensor, driver.LastObservedAt), (audit.SensorId, audit.ObservedAt));
+        Assert.False(string.IsNullOrEmpty(audit.CorrelationId));
+    }
 }

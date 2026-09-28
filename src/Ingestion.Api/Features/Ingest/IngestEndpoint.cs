@@ -42,17 +42,17 @@ public static class IngestEndpoint
         [FromRoute] string sensorId,
         [FromBody] IngestReadingRequest request,
         [AsParameters] Services services,
-        HttpResponse response,
+        HttpContext context,
         CancellationToken ct)
     {
-        var result = await IngestAsync(sensorId, request, services, response, ct);
+        var result = await IngestAsync(sensorId, request, services, context, ct);
         services.Telemetry.Record(sensorId, result.Result);
         return result;
     }
 
     // Imperative shell: validate, load, call the pure core, persist, translate. No rules here.
     private static async Task<Results<Ok<IngestReadingResponse>, ValidationProblem, ProblemHttpResult>> IngestAsync(
-        string sensorId, IngestReadingRequest request, Services services, HttpResponse response, CancellationToken ct)
+        string sensorId, IngestReadingRequest request, Services services, HttpContext context, CancellationToken ct)
     {
         if (!request.Validate().TryGetValue(out var reading, out var invalid))
             return IngestProblems.InvalidRequest(invalid);                                    // AC-6, AC-7
@@ -73,9 +73,12 @@ public static class IngestEndpoint
                 return IngestProblems.Rejected(rejection);                                    // AC-2, AC-5, AC-11
 
             // The registry's ID, not the route's: a case-insensitive registry must not split the idempotency key.
+            // The store keeps the audit entry only if this write inserts the reading (AC-13).
+            var audit = AuditEntry.ForAcceptedReading(
+                context.User, sensor.Id, reading.ObservedAt, services.Clock.GetUtcNow(), CorrelationId(context));
             var started = services.Clock.GetTimestamp();
             var appended = await services.Store.AppendAsync(
-                new ClassifiedReading(sensor.Id, reading.Value, reading.ObservedAt, classification), deadline.Token);
+                new ClassifiedReading(sensor.Id, reading.Value, reading.ObservedAt, classification), audit, deadline.Token);
             services.Telemetry.StoreAnswered(appended, services.Clock.GetElapsedTime(started));
 
             return appended switch
@@ -84,15 +87,19 @@ public static class IngestEndpoint
                 AppendOutcome.Duplicate duplicate =>
                     TypedResults.Ok(new IngestReadingResponse(duplicate.StoredClassification)),   // AC-3
                 AppendOutcome.Conflict => IngestProblems.ConflictingReading(),                  // AC-8
-                AppendOutcome.Unavailable => IngestProblems.StoreUnavailable(response, options.RetryAfter),  // AC-4
+                AppendOutcome.Unavailable => IngestProblems.StoreUnavailable(context.Response, options.RetryAfter),  // AC-4
                 _ => throw new UnreachableException($"Unmapped append outcome '{appended}'."),
             };
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)
         {
-            return IngestProblems.DependencyTimeout(response, options.RetryAfter);            // AC-9
+            return IngestProblems.DependencyTimeout(context.Response, options.RetryAfter);    // AC-9
         }
     }
+
+    /// <summary>The W3C trace ID, the same one problem details, logs, and traces carry (ADR 0008).</summary>
+    private static string CorrelationId(HttpContext context) =>
+        Activity.Current?.TraceId.ToHexString() ?? context.TraceIdentifier;
 
     private static string Describe(FreshnessPolicy policy) =>
         "Limits are inclusive (AC-1). Non-finite values are rejected (AC-2); send them as the strings " +

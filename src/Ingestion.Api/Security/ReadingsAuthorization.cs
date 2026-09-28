@@ -17,9 +17,11 @@ public static class ReadingsAuthorization
     {
         ArgumentNullException.ThrowIfNull(environment);
 
+        // A write is audited by its caller's IDs, so a token without a subject cannot write (ADR 0008).
         services.AddAuthorizationBuilder()
             .AddPolicy(WritePolicy, p => p
                 .RequireAuthenticatedUser()
+                .RequireClaim("sub")
                 .AddRequirements(new ScopeOrAppRoleRequirement(WriteScope, WriteAppRole)));
 
         // Authority, audiences, and (for local development) signing keys bind from

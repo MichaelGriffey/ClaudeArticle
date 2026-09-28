@@ -10,7 +10,7 @@ namespace Ingestion.Testing;
 /// </summary>
 public sealed class FakeReadingStore : IReadingStore
 {
-    private readonly ConcurrentDictionary<(string SensorId, DateTimeOffset ObservedAt), ClassifiedReading> _rows = new();
+    private readonly ConcurrentDictionary<(string SensorId, DateTimeOffset ObservedAt), (ClassifiedReading Reading, AuditEntry Audit)> _rows = new();
     private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _appendCalls;
 
@@ -27,11 +27,15 @@ public sealed class FakeReadingStore : IReadingStore
     public Task Entered => _entered.Task;
 
     public int AppendCalls => Volatile.Read(ref _appendCalls);
-    public IReadOnlyCollection<ClassifiedReading> Rows => [.. _rows.Values];
+    public IReadOnlyCollection<ClassifiedReading> Rows => [.. _rows.Values.Select(row => row.Reading)];
 
-    public async Task<AppendOutcome> AppendAsync(ClassifiedReading reading, CancellationToken ct)
+    /// <summary>The audit entries of inserted readings; each shares its reading's row (ADR 0008).</summary>
+    public IReadOnlyCollection<AuditEntry> AuditTrail => [.. _rows.Values.Select(row => row.Audit)];
+
+    public async Task<AppendOutcome> AppendAsync(ClassifiedReading reading, AuditEntry audit, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(reading);
+        ArgumentNullException.ThrowIfNull(audit);
         Interlocked.Increment(ref _appendCalls);
         _entered.TrySetResult();
 
@@ -42,7 +46,7 @@ public sealed class FakeReadingStore : IReadingStore
         if (IsUnavailable)
             return new AppendOutcome.Unavailable();
 
-        var stored = _rows.GetOrAdd((reading.SensorId, reading.ObservedAt), reading);
-        return AppendOutcome.Of(reading, stored);
+        var stored = _rows.GetOrAdd((reading.SensorId, reading.ObservedAt), (reading, audit));
+        return AppendOutcome.Of(reading, stored.Reading);
     }
 }

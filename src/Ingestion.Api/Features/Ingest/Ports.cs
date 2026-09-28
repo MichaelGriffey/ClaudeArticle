@@ -15,12 +15,13 @@ public interface ISensorRegistry
 public interface IReadingStore
 {
     /// <summary>
-    /// Writes the reading and its outbox event in one transaction (ADR 0001), keyed on
-    /// (SensorId, ObservedAt). Expected outcomes are values, including an outage (ADR 0004);
-    /// an exception means a defect. Resolve a write against the stored row with
+    /// Writes the reading, its outbox event, and its <paramref name="audit"/> entry in one
+    /// transaction (ADR 0001, ADR 0008), keyed on (SensorId, ObservedAt). The audit entry is written
+    /// only when the reading is inserted. Expected outcomes are values, including an outage
+    /// (ADR 0004); an exception means a defect. Resolve a write against the stored row with
     /// <see cref="AppendOutcome.Of"/> so every adapter applies the same idempotency rule.
     /// </summary>
-    Task<AppendOutcome> AppendAsync(ClassifiedReading reading, CancellationToken ct);
+    Task<AppendOutcome> AppendAsync(ClassifiedReading reading, AuditEntry audit, CancellationToken ct);
 }
 
 /// <summary>What the store did with a reading. Closed: the private constructor admits only the nested cases.</summary>

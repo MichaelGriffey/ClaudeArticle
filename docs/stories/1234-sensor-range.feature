@@ -104,3 +104,9 @@ Feature: Out-of-range sensor reading detection
   Scenario: A reading for an unregistered sensor is rejected
     When a reading for sensor "NOPE-01" is received
     Then the reading is rejected with status 404 and code "SensorNotFound"
+
+  @AC-13 @in-process
+  Scenario: An accepted reading is audited once, and its repeat is not
+    Given a reading for "TMP-07" was accepted
+    When a reading with the same sensor and timestamp arrives again
+    Then exactly one audit record names the caller and the reading
