@@ -31,6 +31,9 @@ issues Entra-shaped claims (`scp`, `roles`). Local development keeps `dotnet use
 Outside Development the service refuses to start without a bearer authority (or signing keys) and
 an audience, instead of starting and rejecting every caller.
 
+The policy also requires a `sub` claim, so every accepted write names a subject in the audit trail
+([ADR 0008](0008-audit-trail.md)). Entra ID and `dotnet user-jwts` tokens always carry one.
+
 ## Consequences
 
 - Entra app registration exposes the `readings:write` scope and the `Readings.Write` app role.

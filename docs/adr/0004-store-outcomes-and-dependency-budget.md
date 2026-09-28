@@ -1,6 +1,7 @@
 # ADR 0004: Store outcomes are values, storage is opt-in, and dependencies have a budget
 
-- Status: Accepted (supersedes the failure signal in [ADR 0001](0001-atomic-write-with-outbox.md))
+- Status: Accepted (supersedes the failure signal in [ADR 0001](0001-atomic-write-with-outbox.md));
+  `AppendAsync` also takes the reading's audit entry since [ADR 0008](0008-audit-trail.md)
 - Work item: AB#TBD (architecture hardening), AB#1234 (AC-3, AC-4, AC-8, AC-9)
 
 ## Context

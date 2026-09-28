@@ -23,6 +23,7 @@ Executable form: [1234-sensor-range.feature](1234-sensor-range.feature), run by
 | AC-10 | Readings may arrive out of order: a reading older than one already stored for the same sensor is accepted when it is inside the freshness window |
 | AC-11 | Value checks come before time checks: a non-finite reading outside the freshness window is rejected as `NonFiniteValue` |
 | AC-12 | A reading for an unregistered sensor is rejected with 404 `SensorNotFound`; nothing is persisted |
+| AC-13 | Every accepted reading writes exactly one audit record, in the same transaction as the reading: the caller's IDs (subject, client app, tenant), the action, the sensor and observation time, the server time, and the trace ID. Repeats, conflicts, rejections, and outages write none |
 
 ## Non-functional criteria
 
@@ -30,7 +31,8 @@ Executable form: [1234-sensor-range.feature](1234-sensor-range.feature), run by
 | --- | --- |
 | p99 latency under 50 ms at 2,000 requests per second | Azure Load Testing gate in the staging stage ([ADR 0006](../adr/0006-test-gates.md)) |
 | Zero data loss on pod termination | 200 only after the store commits; no in-memory store without an explicit opt-in ([ADR 0004](../adr/0004-store-outcomes-and-dependency-budget.md)) |
-| Writes require the `readings:write` scope (users) or the `Readings.Write` app role (services) | Integration tests for 401, 403, scopes, and roles ([ADR 0003](../adr/0003-authorization-scope-or-app-role.md)) |
+| Writes require the `readings:write` scope (users) or the `Readings.Write` app role (services), and a subject (`sub`) the audit trail can name | Integration tests for 401, 403, scopes, roles, and subjects ([ADR 0003](../adr/0003-authorization-scope-or-app-role.md), [ADR 0008](../adr/0008-audit-trail.md)) |
+| Audit records are tamper-evident for 30 months and searchable within 2 minutes for 12 months | Immutable Blob Storage and the Sentinel workspace, delivered with the durable store ([ADR 0008](../adr/0008-audit-trail.md)) |
 | Every error response is an RFC 9457 problem details document | Integration tests per status code ([ADR 0002](../adr/0002-problem-details-error-contract.md)) |
 
 ## Open questions
@@ -48,3 +50,4 @@ Executable form: [1234-sensor-range.feature](1234-sensor-range.feature), run by
 - [ADR 0005](../adr/0005-observability.md): health probes, structured logs, and OpenTelemetry over OTLP
 - [ADR 0006](../adr/0006-test-gates.md): Microsoft Testing Platform, Stryker's MTP runner, load testing, and acceptance margins
 - [ADR 0007](../adr/0007-domain-model.md): closed rejection types, the `Reading` value, and where each setting lives
+- [ADR 0008](../adr/0008-audit-trail.md): every accepted reading is audited in the same transaction, IDs only (AC-13)
