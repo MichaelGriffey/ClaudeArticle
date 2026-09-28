@@ -42,6 +42,28 @@ public sealed class StartupTests
         Assert.Throws<OptionsValidationException>(() => api.CreateClient());
     }
 
+    [Theory]
+    [InlineData(IngestionApi.AuthorityKey)]
+    [InlineData(IngestionApi.AudienceKey)]
+    public void Outside_development_the_service_refuses_to_start_without_bearer_settings(string missing)   // ADR 0003
+    {
+        using var api = new IngestionApi();
+        api.Settings[missing] = null;
+
+        var error = Assert.Throws<OptionsValidationException>(() => api.CreateClient());
+        Assert.Contains("Authentication:Schemes:Bearer", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void In_development_the_service_starts_without_an_authority()
+    {
+        using var api = new IngestionApi(IngestionApi.DefaultStart, "Development");
+        api.Settings[IngestionApi.AuthorityKey] = null;
+        api.Settings[IngestionApi.AudienceKey] = null;
+
+        using var client = api.CreateClient();                   // throws if startup fails
+    }
+
     [Fact]
     public void The_service_refuses_to_start_with_a_misspelled_ingestion_setting()
     {

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using Ingestion.Api.Security;
 using Ingestion.Domain;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
@@ -9,8 +10,6 @@ namespace Ingestion.Api.Features.Ingest;
 
 public static class IngestEndpoint
 {
-    public const string WritePolicy = "readings:write";
-
     public static IEndpointRouteBuilder MapIngestReadings(this IEndpointRouteBuilder app)
     {
         ArgumentNullException.ThrowIfNull(app);
@@ -18,7 +17,7 @@ public static class IngestEndpoint
 
         // 200 and 400 are documented by the handler's return type; the rest are problem details (ADR 0002).
         app.MapPost("/sensors/{sensorId}/readings", HandleAsync)
-           .RequireAuthorization(WritePolicy)                     // no anonymous writes
+           .RequireAuthorization(ReadingsAuthorization.WritePolicy)   // no anonymous writes (ADR 0003)
            .WithName("IngestReading")
            .WithTags("Readings")
            .WithSummary("Classify a sensor reading against its calibrated limits and store it.")

@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
-using Ingestion.Api.Features.Ingest;
+using Ingestion.Api.Security;
 using Ingestion.Testing;
 using Xunit;
 using static Ingestion.IntegrationTests.Problems;
@@ -19,7 +19,7 @@ public sealed class IngestEndpointTests
     public async Task A_reading_at_the_upper_limit_is_classified_nominal_and_persisted()   // AC-1
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostAsJsonAsync(Url, new { value = 125.0, observedAt = Now }, Ct);
 
@@ -35,7 +35,7 @@ public sealed class IngestEndpointTests
     public async Task Quoted_non_finite_values_reach_the_domain_and_get_422(string jsonValue)   // AC-2
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostRawAsync(Url, $$"""{"value":{{jsonValue}},"observedAt":"{{NowIso}}"}""");
 
@@ -47,7 +47,7 @@ public sealed class IngestEndpointTests
     public async Task A_duplicate_reading_is_idempotent()                                      // AC-3
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
         var reading = new { value = 130.0, observedAt = Now };
 
         using var first = await client.PostAsJsonAsync(Url, reading, Ct);
@@ -63,7 +63,7 @@ public sealed class IngestEndpointTests
     public async Task A_different_value_for_a_stored_timestamp_gets_409_and_changes_nothing()  // AC-8
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var first = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
         using var second = await client.PostAsJsonAsync(Url, new { value = 200.0, observedAt = Now }, Ct);
@@ -79,7 +79,7 @@ public sealed class IngestEndpointTests
     {
         await using var api = new IngestionApi();
         api.Store.Hangs = true;
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         var pending = client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
         await api.Store.Entered.WaitAsync(Ct);
@@ -95,7 +95,7 @@ public sealed class IngestEndpointTests
     public async Task An_older_reading_inside_the_window_is_accepted_after_a_newer_one()      // AC-10
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var newer = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
         using var older = await client.PostAsJsonAsync(Url, new { value = 21.0, observedAt = Now.AddSeconds(-10) }, Ct);
@@ -110,7 +110,7 @@ public sealed class IngestEndpointTests
     {
         await using var api = new IngestionApi();
         api.Store.IsUnavailable = true;
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
 
@@ -123,7 +123,7 @@ public sealed class IngestEndpointTests
     public async Task A_stale_reading_gets_422_with_its_age_and_the_limit()                   // AC-5
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now.AddSeconds(-301) }, Ct);
 
@@ -137,7 +137,7 @@ public sealed class IngestEndpointTests
     public async Task A_future_reading_gets_422_with_its_skew_and_the_limit()                 // AC-5
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now.AddSeconds(3) }, Ct);
 
@@ -155,7 +155,7 @@ public sealed class IngestEndpointTests
     public async Task Missing_fields_get_400_naming_each_field(string json, string[] fields)  // AC-6
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostRawAsync(Url, json);
 
@@ -174,7 +174,7 @@ public sealed class IngestEndpointTests
     public async Task A_timestamp_without_an_explicit_offset_gets_400(string observedAt)      // AC-7
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostRawAsync(Url, $$"""{"value":20.0,"observedAt":"{{observedAt}}"}""");
 
@@ -190,7 +190,7 @@ public sealed class IngestEndpointTests
     public async Task A_timestamp_with_an_explicit_offset_is_accepted(string observedAt)      // AC-7
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostRawAsync(Url, $$"""{"value":20.0,"observedAt":"{{observedAt}}"}""");
 
@@ -201,7 +201,7 @@ public sealed class IngestEndpointTests
     public async Task An_unknown_sensor_gets_404_and_persists_nothing()                        // AC-12
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostAsJsonAsync(
             new Uri("/sensors/NOPE-01/readings", UriKind.Relative), new { value = 20.0, observedAt = Now }, Ct);

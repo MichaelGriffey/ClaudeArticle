@@ -35,13 +35,27 @@ public sealed class IngestionApi(DateTimeOffset start, string environment = "Tes
     public Dictionary<string, string?> Settings { get; } = new(StringComparer.Ordinal)
     {
         [ReadingStorage.ProviderKey] = ReadingStorage.InMemory,
+        // A bearer configuration that passes the startup check; requests use TestAuthHandler instead.
+        [AuthorityKey] = "https://login.test.invalid/tenant/v2.0",
+        [AudienceKey] = "api://ingestion-tests",
     };
 
-    /// <summary>A client whose requests authenticate with the given scope.</summary>
-    public HttpClient CreateClientWithScope(string scope)
+    public const string AuthorityKey = "Authentication:Schemes:Bearer:Authority";
+    public const string AudienceKey = "Authentication:Schemes:Bearer:ValidAudiences:0";
+
+    /// <summary>A client whose requests carry the given delegated scopes (space-separated, like Entra's scp).</summary>
+    public HttpClient CreateClientWithScope(string scopes)
     {
         var client = CreateClient();
-        client.DefaultRequestHeaders.Add(TestAuthHandler.ScopeHeader, scope);
+        client.DefaultRequestHeaders.Add(TestAuthHandler.ScopeHeader, scopes);
+        return client;
+    }
+
+    /// <summary>A client whose requests carry the given app roles, as a service's token would.</summary>
+    public HttpClient CreateClientWithAppRoles(params string[] roles)
+    {
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Add(TestAuthHandler.AppRolesHeader, string.Join(',', roles));
         return client;
     }
 

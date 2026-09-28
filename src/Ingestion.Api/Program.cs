@@ -2,8 +2,8 @@ using System.Text.Json.Serialization;
 using Ingestion.Api.Features.Ingest;
 using Ingestion.Api.Infrastructure;
 using Ingestion.Api.OpenApi;
+using Ingestion.Api.Security;
 using Ingestion.Domain;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,17 +25,9 @@ builder.Services.AddOptions<IngestionOptions>()
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
-// Authentication (for example, Microsoft Entra ID bearer tokens) is registered per environment.
-builder.Services.AddAuthorizationBuilder()
-    // Authentication (for example, Microsoft Entra ID bearer tokens) is registered per environment.
-    .AddPolicy(IngestEndpoint.WritePolicy, p => p
-        .RequireAuthenticatedUser()
-        .RequireClaim("scope", IngestEndpoint.WritePolicy
-    ));
-
-// Authority and audiences bind from configuration (Authentication:Schemes:Bearer).
-// With no configuration every token is rejected: the service fails closed.
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
+// Writes need the readings:write scope (people) or the Readings.Write app role (services), from
+// bearer tokens such as Microsoft Entra ID's. Fails closed: see ADR 0003.
+builder.Services.AddReadingsAuthorization(builder.Environment);
 
 // Adapters. The registry is read and checked from configuration at startup. The store is chosen by
 // Storage:Provider; no durable one exists yet, so production refuses to start (ADR 0004).

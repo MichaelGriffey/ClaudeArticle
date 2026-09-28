@@ -31,7 +31,8 @@ public sealed class BearerSecurityOperationTransformer : IOpenApiOperationTransf
             Type = SecuritySchemeType.Http,
             Scheme = "bearer",
             BearerFormat = "JWT",
-            Description = "Bearer token with the required scope. For local development: dotnet user-jwts create --scope \"readings:write\"",
+            Description = "Bearer token with the readings:write scope (people) or the Readings.Write app role (services). " +
+                          "For local development: dotnet user-jwts create --scope \"readings:write\"",
         });
 
         // The reference must carry the document, or the requirement is dropped when serialized.

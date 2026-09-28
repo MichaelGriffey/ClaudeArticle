@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using Ingestion.Api.Features.Ingest;
+using Ingestion.Api.Security;
 using Ingestion.Testing;
 
 namespace Ingestion.AcceptanceTests.Support;
@@ -24,7 +24,7 @@ public sealed class IngestionDriver : IDisposable
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
             _host = new IngestionApi();
-            _client = _host.CreateClientWithScope(IngestEndpoint.WritePolicy);
+            _client = _host.CreateClientWithScope(ReadingsAuthorization.WriteScope);
             return;
         }
 

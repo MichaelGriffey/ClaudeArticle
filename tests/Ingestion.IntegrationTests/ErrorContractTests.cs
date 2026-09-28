@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
-using Ingestion.Api.Features.Ingest;
+using Ingestion.Api.Security;
 using Ingestion.Testing;
 using Xunit;
 using static Ingestion.IntegrationTests.Problems;
@@ -42,7 +42,7 @@ public sealed class ErrorContractTests
     public async Task Malformed_json_gets_a_400_problem()
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostRawAsync(Url, """{"value":NaN,"observedAt":"2026-09-27T14:00:00Z"}""");
 
@@ -54,7 +54,7 @@ public sealed class ErrorContractTests
     public async Task A_body_that_is_not_json_gets_a_415_problem()
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
         using var content = new StringContent("value=20", Encoding.UTF8, "text/plain");
 
         using var response = await client.PostAsync(Url, content, Ct);
@@ -66,7 +66,7 @@ public sealed class ErrorContractTests
     public async Task An_unknown_route_gets_a_404_problem()
     {
         await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.GetAsync(new Uri("/no-such-route", UriKind.Relative), Ct);
 
@@ -78,7 +78,7 @@ public sealed class ErrorContractTests
     {
         await using var api = new IngestionApi();
         api.Store.Fault = new InvalidOperationException("Server=db.internal;Password=hunter2");
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+        using var client = api.CreateClientWithScope(ReadingsAuthorization.WriteScope);
 
         using var response = await client.PostAsJsonAsync(Url, Reading, Ct);
 
