@@ -33,6 +33,8 @@ stages:
       displayName: Restore from lock files
     - script: dotnet format --verify-no-changes --no-restore
       displayName: Formatting gate
+    - script: bash .claude/hooks/runs-git-commit.test.sh
+      displayName: Commit hook filter tests
     - script: dotnet build -c $(config) --no-restore -warnaserror
       displayName: Build, warnings as errors
     # Suites run on Microsoft Testing Platform (global.json), so plain dotnet test replaces the

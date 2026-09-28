@@ -28,6 +28,13 @@ dotnet stryker --break-at 80
 The first restore creates a `packages.lock.json` per project. Commit them: CI restores with
 `--locked-mode` and fails if they are missing or stale.
 
+The commit hook decides which Bash commands are commits with `.claude/hooks/runs-git-commit.awk`. Its
+tests run in the pipeline and locally with Git Bash (on Windows) or any POSIX shell:
+
+```bash
+bash .claude/hooks/runs-git-commit.test.sh
+```
+
 ## Run the API and explore it in Swagger UI
 
 ```powershell

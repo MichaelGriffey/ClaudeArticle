@@ -372,10 +372,17 @@ Each repository enforces three layers, strongest first:
 # some Claude Code versions ignore the "if" in settings.json and run the hook for every command.
 # Exit 2 blocks the commit and returns stderr to Claude as the reason.
 set -uo pipefail
+hooks_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 input=$(cat)
-# `git`, optional arguments inside the same JSON string (escaped quotes allowed), then `commit`.
-if ! grep -Eq '(^|[^[:alnum:]_-])git[[:space:]](([^"]|\\")*[[:space:]])?commit([^[:alnum:]_-]|$)' <<<"$input"; then
+# Cheap check first: most commands never mention both words.
+case "$input" in
+  *git*commit*) ;;
+  *) exit 0 ;;
+esac
+# Then scan the command the way a shell reads it, so text that merely mentions git and commit (a
+# heredoc, a quoted message) passes. Tests: runs-git-commit.test.sh.
+if ! awk -f "$hooks_dir/runs-git-commit.awk" <<<"$input"; then
   exit 0
 fi
 
@@ -405,6 +412,8 @@ exit 0
 ```
 
 Commit the script as executable (`git update-index --chmod=+x`). Without the bit, the hook fails to run on macOS and Linux clones, and a hook that cannot run does not block anything.
+
+Decide "is this a commit?" the way a shell would, not with a text search. A regular expression over the tool call also matches a heredoc or a quoted message that merely mentions git and commit, and on `main` the hook then refuses a harmless command. `runs-git-commit.awk` drops quoted text and heredoc bodies, splits the command at `;`, `&&`, `|`, and subshells, and gates only a command whose program is `git` and whose subcommand is `commit`. It is portable awk, so the hook has no dependencies, and `runs-git-commit.test.sh` pins its behavior in the pipeline.
 
 ### Organization guardrails
 
@@ -1058,6 +1067,8 @@ stages:
       displayName: Restore from lock files
     - script: dotnet format --verify-no-changes --no-restore
       displayName: Formatting gate
+    - script: bash .claude/hooks/runs-git-commit.test.sh
+      displayName: Commit hook filter tests
     - script: dotnet build -c $(config) --no-restore -warnaserror
       displayName: Build, warnings as errors
     # Suites run on Microsoft Testing Platform (global.json), so plain dotnet test replaces the
