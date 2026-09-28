@@ -5,6 +5,10 @@ using Ingestion.Api.OpenApi;
 using Ingestion.Api.Security;
 using Ingestion.Domain;
 using Microsoft.OpenApi;
+using OpenTelemetry;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -33,7 +37,18 @@ builder.Services.AddReadingsAuthorization(builder.Environment);
 // Storage:Provider; no durable one exists yet, so production refuses to start (ADR 0004).
 var sensors = InMemorySensorRegistry.FromConfiguration(builder.Configuration.GetSection("Sensors"));
 builder.Services.AddSingleton<ISensorRegistry>(sensors);
-builder.Services.AddReadingStorage(builder.Configuration);
+builder.Services.AddReadingStorage(builder.Configuration);   // also registers the store's readiness check
+
+// Observability (ADR 0005): logs and metrics from the slice, ASP.NET Core metrics and traces.
+// Exported over OTLP only where an endpoint is configured, so development and tests export nothing.
+builder.Services.AddSingleton<IngestTelemetry>();
+var openTelemetry = builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r.AddService("ingestion-api"))
+    .WithMetrics(m => m.AddAspNetCoreInstrumentation().AddMeter(IngestTelemetry.MeterName))
+    .WithTracing(t => t.AddAspNetCoreInstrumentation())
+    .WithLogging();
+if (!string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]))
+    openTelemetry.UseOtlpExporter();
 
 // OpenAPI document generated from endpoint metadata; bearer security documented per secured operation.
 builder.Services.AddOpenApi(o =>
@@ -84,6 +99,10 @@ if (app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Platform probes (ADR 0005): anonymous by that ADR, and they answer with a status word only.
+app.MapHealthChecks("/health/live", new() { Predicate = _ => false });             // the process is up
+app.MapHealthChecks("/health/ready", new() { Predicate = c => c.Tags.Contains(ReadingStorage.ReadyTag) });
 
 app.MapIngestReadings();
 await app.RunAsync();

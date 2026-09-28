@@ -35,15 +35,24 @@ public static class IngestEndpoint
         [FromServices] IReadingStore Store,
         [FromServices] TimeProvider Clock,
         [FromServices] FreshnessPolicy Policy,
-        [FromServices] IOptions<IngestionOptions> Options);
+        [FromServices] IOptions<IngestionOptions> Options,
+        [FromServices] IngestTelemetry Telemetry);
 
-    // Imperative shell: validate, load, call the pure core, persist, translate. No rules here.
     private static async Task<Results<Ok<IngestReadingResponse>, ValidationProblem, ProblemHttpResult>> HandleAsync(
         [FromRoute] string sensorId,
         [FromBody] IngestReadingRequest request,
         [AsParameters] Services services,
         HttpResponse response,
         CancellationToken ct)
+    {
+        var result = await IngestAsync(sensorId, request, services, response, ct);
+        services.Telemetry.Record(sensorId, result.Result);
+        return result;
+    }
+
+    // Imperative shell: validate, load, call the pure core, persist, translate. No rules here.
+    private static async Task<Results<Ok<IngestReadingResponse>, ValidationProblem, ProblemHttpResult>> IngestAsync(
+        string sensorId, IngestReadingRequest request, Services services, HttpResponse response, CancellationToken ct)
     {
         if (!request.Validate().TryGetValue(out var reading, out var invalid))
             return IngestProblems.InvalidRequest(invalid);                                    // AC-6, AC-7
@@ -64,8 +73,10 @@ public static class IngestEndpoint
                 return IngestProblems.Rejected(rejection);                                    // AC-2, AC-5, AC-11
 
             // The registry's ID, not the route's: a case-insensitive registry must not split the idempotency key.
+            var started = services.Clock.GetTimestamp();
             var appended = await services.Store.AppendAsync(
                 new ClassifiedReading(sensor.Id, reading.Value, reading.ObservedAt, classification), deadline.Token);
+            services.Telemetry.StoreAnswered(appended, services.Clock.GetElapsedTime(started));
 
             return appended switch
             {

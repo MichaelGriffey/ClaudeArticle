@@ -11,6 +11,13 @@
     <PackageVersion Include="Swashbuckle.AspNetCore.SwaggerUI" Version="10.2.3" />
   </ItemGroup>
 
+  <!-- ADR 0005. Apache-2.0; exported over OTLP only when OTEL_EXPORTER_OTLP_ENDPOINT is set. -->
+  <ItemGroup Label="Observability">
+    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.19.1" />
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.19.1" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.19.0" />
+  </ItemGroup>
+
   <!-- Suites run on Microsoft Testing Platform (see global.json), which Stryker's MTP runner needs.
        Microsoft.NET.Test.Sdk and xunit.runner.visualstudio stay for Visual Studio Test Explorer
        and Live Unit Testing. -->
