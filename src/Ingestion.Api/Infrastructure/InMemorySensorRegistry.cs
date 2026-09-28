@@ -36,10 +36,7 @@ public sealed class InMemorySensorRegistry : ISensorRegistry
             if (string.IsNullOrWhiteSpace(o.Id))
                 throw new InvalidOperationException("Every configured sensor needs an Id.");
 
-            var limits = Limits.Create(o.Lower, o.Upper).Match(
-                l => l,
-                e => throw new InvalidOperationException($"Sensor '{o.Id}' has invalid limits: {e}"));
-            return new Sensor(o.Id, limits);
+            return new Sensor(o.Id, Limits.Create(o.Lower, o.Upper).OrThrowAtStartup($"limits for sensor '{o.Id}'"));
         });
 
         return new InMemorySensorRegistry(sensors);

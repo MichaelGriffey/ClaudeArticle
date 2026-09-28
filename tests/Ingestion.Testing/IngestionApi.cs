@@ -28,6 +28,15 @@ public sealed class IngestionApi(DateTimeOffset start, string environment = "Tes
     public FakeTimeProvider Clock { get; } = new FakeTimeProvider(start);
     public FakeReadingStore Store { get; } = new();
 
+    /// <summary>
+    /// Configuration applied before the app starts, as an environment would supply it. Change entries
+    /// before the first request; a null value removes the setting.
+    /// </summary>
+    public Dictionary<string, string?> Settings { get; } = new(StringComparer.Ordinal)
+    {
+        [ReadingStorage.ProviderKey] = ReadingStorage.InMemory,
+    };
+
     /// <summary>A client whose requests authenticate with the given scope.</summary>
     public HttpClient CreateClientWithScope(string scope)
     {
@@ -40,13 +49,16 @@ public sealed class IngestionApi(DateTimeOffset start, string environment = "Tes
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.UseEnvironment(_environment);
+        foreach (var (key, value) in Settings)
+            builder.UseSetting(key, value);
+
         builder.ConfigureTestServices(services =>
         {
             services.Replace(ServiceDescriptor.Singleton<TimeProvider>(Clock));
             services.Replace(ServiceDescriptor.Singleton<IReadingStore>(Store));
             services.Replace(ServiceDescriptor.Singleton<ISensorRegistry>(new InMemorySensorRegistry(
             [
-                new Sensor("TMP-07", Limits.Create(-40.0, 125.0).Match(l => l, e => throw new InvalidOperationException(e.ToString()))),
+                new Sensor("TMP-07", Limits.Create(-40.0, 125.0).OrThrowAtStartup("test limits")),
             ])));
 
             services.AddAuthentication(o =>

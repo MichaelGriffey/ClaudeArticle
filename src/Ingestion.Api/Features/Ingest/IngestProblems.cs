@@ -44,11 +44,22 @@ internal static class IngestProblems
         _ => throw new UnreachableException($"Unmapped rejection '{rejection.Code}'."),
     };
 
+    public static ProblemHttpResult ConflictingReading() =>
+        Problem(StatusCodes.Status409Conflict, "ConflictingReading", "conflicting-reading",
+            "A different value is already stored for this sensor and timestamp.");
+
     public static ProblemHttpResult StoreUnavailable(HttpResponse response, TimeSpan retryAfter)
     {
         SetRetryAfter(response, retryAfter);
         return Problem(StatusCodes.Status503ServiceUnavailable, "EventStoreUnavailable", "event-store-unavailable",
             "The reading store is unavailable. Retry after the interval in the Retry-After header.");
+    }
+
+    public static ProblemHttpResult DependencyTimeout(HttpResponse response, TimeSpan retryAfter)
+    {
+        SetRetryAfter(response, retryAfter);
+        return Problem(StatusCodes.Status503ServiceUnavailable, "DependencyTimeout", "dependency-timeout",
+            "A dependency did not answer within the time budget. Retry after the interval in the Retry-After header.");
     }
 
     private static void SetRetryAfter(HttpResponse response, TimeSpan retryAfter) =>

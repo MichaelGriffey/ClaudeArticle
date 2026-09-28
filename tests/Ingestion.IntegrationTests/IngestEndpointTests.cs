@@ -48,14 +48,61 @@ public sealed class IngestEndpointTests
     {
         await using var api = new IngestionApi();
         using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
-        var reading = new { value = 20.0, observedAt = Now };
+        var reading = new { value = 130.0, observedAt = Now };
 
         using var first = await client.PostAsJsonAsync(Url, reading, Ct);
         using var second = await client.PostAsJsonAsync(Url, reading, Ct);
 
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.Equal("High", (await ReadJsonAsync(second)).GetProperty("classification").GetString());
         Assert.Single(api.Store.Rows);
+    }
+
+    [Fact]
+    public async Task A_different_value_for_a_stored_timestamp_gets_409_and_changes_nothing()  // AC-8
+    {
+        await using var api = new IngestionApi();
+        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+
+        using var first = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
+        using var second = await client.PostAsJsonAsync(Url, new { value = 200.0, observedAt = Now }, Ct);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        await AssertProblemAsync(second, HttpStatusCode.Conflict, "ConflictingReading");
+        var stored = Assert.Single(api.Store.Rows);
+        Assert.Equal(20.0, stored.Value);
+    }
+
+    [Fact]
+    public async Task A_store_that_does_not_answer_within_the_budget_gets_503_DependencyTimeout()   // AC-9
+    {
+        await using var api = new IngestionApi();
+        api.Store.Hangs = true;
+        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+
+        var pending = client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
+        await api.Store.Entered.WaitAsync(Ct);
+        api.Clock.Advance(TimeSpan.FromSeconds(2));                                  // the configured budget
+        using var response = await pending;
+
+        await AssertProblemAsync(response, HttpStatusCode.ServiceUnavailable, "DependencyTimeout");
+        Assert.Equal(TimeSpan.FromSeconds(5), response.Headers.RetryAfter?.Delta);
+        Assert.Empty(api.Store.Rows);
+    }
+
+    [Fact]
+    public async Task An_older_reading_inside_the_window_is_accepted_after_a_newer_one()      // AC-10
+    {
+        await using var api = new IngestionApi();
+        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+
+        using var newer = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
+        using var older = await client.PostAsJsonAsync(Url, new { value = 21.0, observedAt = Now.AddSeconds(-10) }, Ct);
+
+        Assert.Equal(HttpStatusCode.OK, newer.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, older.StatusCode);
+        Assert.Equal(2, api.Store.Rows.Count);
     }
 
     [Fact]

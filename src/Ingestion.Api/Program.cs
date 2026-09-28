@@ -15,9 +15,15 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 
 builder.Services.AddProblemDetails();
 builder.Services.AddSingleton(TimeProvider.System);
+
+// Requirement values come from the story (AC-5); operational values from configuration (ADR 0007).
 builder.Services.AddSingleton(
     FreshnessPolicy.Create(FreshnessRequirements.MaxAge, FreshnessRequirements.MaxSkew)
-        .Match(p => p, e => throw new InvalidOperationException($"Invalid freshness policy: {e}")));
+        .OrThrowAtStartup("freshness policy"));
+builder.Services.AddOptions<IngestionOptions>()
+    .BindConfiguration(IngestionOptions.SectionName, o => o.ErrorOnUnknownConfiguration = true)
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
 
 // Authentication (for example, Microsoft Entra ID bearer tokens) is registered per environment.
 builder.Services.AddAuthorizationBuilder()
@@ -31,11 +37,11 @@ builder.Services.AddAuthorizationBuilder()
 // With no configuration every token is rejected: the service fails closed.
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
 
-// Development adapters. Production replaces these with a database-backed registry and an
-// outbox-backed store; the endpoint and the core do not change.
+// Adapters. The registry is read and checked from configuration at startup. The store is chosen by
+// Storage:Provider; no durable one exists yet, so production refuses to start (ADR 0004).
 var sensors = InMemorySensorRegistry.FromConfiguration(builder.Configuration.GetSection("Sensors"));
 builder.Services.AddSingleton<ISensorRegistry>(sensors);
-builder.Services.AddSingleton<IReadingStore, InMemoryReadingStore>();
+builder.Services.AddReadingStorage(builder.Configuration);
 
 // OpenAPI document generated from endpoint metadata; bearer security documented per secured operation.
 builder.Services.AddOpenApi(o =>

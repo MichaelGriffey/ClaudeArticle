@@ -4,33 +4,45 @@ using Ingestion.Api.Features.Ingest;
 namespace Ingestion.Testing;
 
 /// <summary>
-/// Store double that honors the idempotency contract and can simulate an outage or a defect.
-/// <see cref="AppendCalls"/> counts attempts; <see cref="Rows"/> holds what was persisted.
+/// Store double that honors the idempotency contract (<see cref="AppendOutcome.Of"/>) and can
+/// simulate an outage, a hang, or a defect. <see cref="AppendCalls"/> counts attempts;
+/// <see cref="Rows"/> holds what was persisted.
 /// </summary>
 public sealed class FakeReadingStore : IReadingStore
 {
     private readonly ConcurrentDictionary<(string SensorId, DateTimeOffset ObservedAt), ClassifiedReading> _rows = new();
+    private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _appendCalls;
 
+    /// <summary>Every append reports <see cref="AppendOutcome.Unavailable"/> (AC-4).</summary>
     public bool IsUnavailable { get; set; }
 
-    /// <summary>When set, every append throws it: an unexpected failure, not an outage.</summary>
+    /// <summary>Every append waits until its token is cancelled, as a hung database would (AC-9).</summary>
+    public bool Hangs { get; set; }
+
+    /// <summary>When set, every append throws it: a defect, not an outage.</summary>
     public Exception? Fault { get; set; }
+
+    /// <summary>Completes when the first append starts, so a test can move the clock while it waits.</summary>
+    public Task Entered => _entered.Task;
 
     public int AppendCalls => Volatile.Read(ref _appendCalls);
     public IReadOnlyCollection<ClassifiedReading> Rows => [.. _rows.Values];
 
-    public Task AppendAsync(ClassifiedReading reading, CancellationToken ct)
+    public async Task<AppendOutcome> AppendAsync(ClassifiedReading reading, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(reading);
         Interlocked.Increment(ref _appendCalls);
+        _entered.TrySetResult();
 
         if (Fault is not null)
             throw Fault;
+        if (Hangs)
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
         if (IsUnavailable)
-            throw new StoreUnavailableException("Simulated outage.", new TimeoutException());
+            return new AppendOutcome.Unavailable();
 
-        _rows.TryAdd((reading.SensorId, reading.ObservedAt), reading);
-        return Task.CompletedTask;
+        var stored = _rows.GetOrAdd((reading.SensorId, reading.ObservedAt), reading);
+        return AppendOutcome.Of(reading, stored);
     }
 }
