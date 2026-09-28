@@ -2,6 +2,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
+    <!-- Generated code-behind goes to obj/, not beside the linked story in docs/. -->
+    <ReqnrollUseIntermediateOutputPathForCodeBehind>true</ReqnrollUseIntermediateOutputPathForCodeBehind>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
@@ -12,5 +14,9 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../Ingestion.Testing/Ingestion.Testing.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The story's Gherkin is the only copy (ADR 0006); it is linked, not duplicated. -->
+    <ReqnrollFeatureFiles Include="../../docs/stories/*.feature" Link="Features/%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

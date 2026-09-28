@@ -3,8 +3,11 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Ingestion.Api.Features.Ingest;
 using Ingestion.Api.Security;
 using Ingestion.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Ingestion.AcceptanceTests.Support;
 
@@ -15,6 +18,12 @@ namespace Ingestion.AcceptanceTests.Support;
 /// </summary>
 public sealed class IngestionDriver : IDisposable
 {
+    /// <summary>
+    /// How far in the past a reading is stamped when its time is not under test: well inside the
+    /// freshness window whatever the agent's clock skew and the network delay (ADR 0006).
+    /// </summary>
+    private static readonly TimeSpan SafeAge = TimeSpan.FromSeconds(30);
+
     private readonly IngestionApi? _host;
     private readonly HttpClient _client;
 
@@ -42,24 +51,40 @@ public sealed class IngestionDriver : IDisposable
     public bool IsInProcess => _host is not null;
     public DateTimeOffset Now => _host?.Clock.GetUtcNow() ?? DateTimeOffset.UtcNow;
 
+    /// <summary>A timestamp for scenarios that do not test time.</summary>
+    public DateTimeOffset SafeNow => Now - SafeAge;
+
     /// <summary>The in-memory store. Scenarios that need it are tagged @in-process.</summary>
-    public FakeReadingStore Store =>
-        _host?.Store ?? throw new InvalidOperationException("This step needs the in-process host (tag the scenario @in-process).");
+    public FakeReadingStore Store => InProcessHost.Store;
+
+    /// <summary>Moves the in-process clock by the configured dependency budget (AC-9).</summary>
+    public void ExhaustDependencyBudget()
+    {
+        var host = InProcessHost;
+        host.Clock.Advance(host.Services.GetRequiredService<IOptions<IngestionOptions>>().Value.DependencyBudget);
+    }
+
+    public static string Iso(DateTimeOffset instant) => instant.ToString("O", CultureInfo.InvariantCulture);
 
     /// <summary>Posts a reading. <paramref name="rawValue"/> is sent as a JSON number when finite, else as a string.</summary>
-    public async Task PostReadingAsync(string sensorId, string rawValue, DateTimeOffset observedAt, CancellationToken ct)
+    public Task PostReadingAsync(string sensorId, string rawValue, DateTimeOffset observedAt, CancellationToken ct)
     {
         var number = double.Parse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture);
         var valueJson = double.IsFinite(number)
             ? number.ToString("R", CultureInfo.InvariantCulture)
             : JsonSerializer.Serialize(rawValue);
-        var json = $$"""{"value":{{valueJson}},"observedAt":"{{observedAt.ToString("O", CultureInfo.InvariantCulture)}}"}""";
 
+        LastObservedAt = observedAt;
+        return PostAsync(sensorId, $$"""{"value":{{valueJson}},"observedAt":"{{Iso(observedAt)}}"}""", ct);
+    }
+
+    /// <summary>Posts a body exactly as given, for requests that never reach the domain (AC-6, AC-7).</summary>
+    public async Task PostAsync(string sensorId, string json, CancellationToken ct)
+    {
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
         var url = new Uri($"/sensors/{Uri.EscapeDataString(sensorId)}/readings", UriKind.Relative);
         using var response = await _client.PostAsync(url, content, ct);
 
-        LastObservedAt = observedAt;
         LastStatus = response.StatusCode;
         LastRetryAfter = response.Headers.RetryAfter?.Delta;
         var body = await response.Content.ReadAsStringAsync(ct);
@@ -78,4 +103,7 @@ public sealed class IngestionDriver : IDisposable
         _client.Dispose();
         _host?.Dispose();
     }
+
+    private IngestionApi InProcessHost =>
+        _host ?? throw new InvalidOperationException("This step needs the in-process host (tag the scenario @in-process).");
 }

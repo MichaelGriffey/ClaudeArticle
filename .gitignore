@@ -2,6 +2,8 @@ bin/
 obj/
 TestResults/
 StrykerOutput/
+# Reqnroll code-behind: generated into obj/, and never committed if an older setup puts it beside the feature.
+*.feature.cs
 .vs/
 .idea/
 *.user
