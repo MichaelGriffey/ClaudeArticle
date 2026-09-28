@@ -4,12 +4,12 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" />
     <!-- Referenced directly (not only through Ingestion.Testing) so its build targets copy the API's deps file. -->
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
     <PackageReference Include="xunit.runner.visualstudio" />
-    <PackageReference Include="xunit.v3.mtp-off" />
+    <PackageReference Include="xunit.v3" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../Ingestion.Testing/Ingestion.Testing.csproj" />

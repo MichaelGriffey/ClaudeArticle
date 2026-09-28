@@ -1,0 +1,10 @@
+{
+  "stryker-config": {
+    "test-runner": "mtp",
+    "thresholds": {
+      "high": 90,
+      "low": 80,
+      "break": 80
+    }
+  }
+}

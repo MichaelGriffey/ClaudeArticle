@@ -34,24 +34,28 @@ stages:
       displayName: Formatting gate
     - script: dotnet build -c $(config) --no-restore -warnaserror
       displayName: Build, warnings as errors
-    - task: DotNetCoreCLI@2
+    # Suites run on Microsoft Testing Platform (global.json), so plain dotnet test replaces the
+    # DotNetCoreCLI task, which adds VSTest-only arguments.
+    - script: >
+        dotnet test --project tests/Ingestion.UnitTests -c $(config) --no-build
+        --results-directory $(Agent.TempDirectory)/unit --report-xunit-trx
+        --coverage --coverage-output-format cobertura --coverage-output coverage.cobertura.xml
       displayName: Unit and property tests
-      inputs:
-        command: test
-        projects: tests/**/*.UnitTests.csproj
-        arguments: -c $(config) --no-build --collect "XPlat Code Coverage"
     - script: dotnet stryker --break-at 80
       displayName: Mutation gate (score of 80 or better)
       workingDirectory: tests/Ingestion.UnitTests
-    - task: DotNetCoreCLI@2
+    - script: |
+        set -euo pipefail
+        dotnet test --project tests/Ingestion.IntegrationTests -c $(config) --no-build \
+          --results-directory $(Agent.TempDirectory)/integration --report-xunit-trx
+        dotnet test --project tests/Ingestion.AcceptanceTests -c $(config) --no-build \
+          --results-directory $(Agent.TempDirectory)/acceptance --report-xunit-trx
       displayName: Integration and in-process acceptance tests
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
       inputs:
-        command: test
-        projects: |
-          tests/**/*.IntegrationTests.csproj
-          tests/**/*.ContractTests.csproj
-          tests/**/*.AcceptanceTests.csproj
-        arguments: -c $(config) --no-build
+        testResultsFormat: VSTest
+        testResultsFiles: $(Agent.TempDirectory)/**/*.trx
     - task: PublishCodeCoverageResults@2
       condition: succeededOrFailed()
       inputs:
@@ -86,12 +90,10 @@ stages:
     - task: UseDotNet@2
       inputs:
         useGlobalJson: true
-    - task: DotNetCoreCLI@2
+    - script: >
+        dotnet test --project tests/Ingestion.AcceptanceTests
+        --filter-not-trait "Category=in-process" --report-xunit-trx
       displayName: Gherkin acceptance suite against staging
-      inputs:
-        command: test
-        projects: tests/**/*.AcceptanceTests.csproj
-        arguments: --filter "Category!=in-process"
       env:
         INGESTION_BASE_URL: $(stagingBaseUrl)
         INGESTION_ACCESS_TOKEN: $(stagingAccessToken)   # secret variable in the group

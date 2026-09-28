@@ -94,7 +94,12 @@ Invoke-RestMethod -Method Post -Uri http://localhost:5099/sensors/TMP-07/reading
 | `Ingestion.AcceptanceTests` | The Gherkin story, scenario by scenario | In-memory host, or a deployed environment when `INGESTION_BASE_URL` is set |
 
 Scenarios tagged `@in-process` inject faults or inspect the store, so the staging run filters them
-out with `--filter "Category!=in-process"`.
+out with `--filter-not-trait "Category=in-process"`.
+
+All suites run on Microsoft Testing Platform (opted in through `global.json`). Stryker needs it: its
+default VSTest runner cannot activate mutants in xUnit v3 test processes and scores every mutant as
+survived. `tests/Ingestion.UnitTests/stryker-config.json` selects the MTP runner, so the command stays
+`dotnet stryker --break-at 80`.
 
 ## Differences from the article
 
