@@ -80,13 +80,20 @@ non-functional criteria with measurable thresholds.
 
 The questions Claude returns are the real value. Typical ones: What happens when a reading is exactly on the threshold? Are readings idempotent by sensor and timestamp? What is the behavior when the downstream store is unavailable? Is NaN a reading or an error? Each answer becomes a criterion.
 
-The resulting story reads like this. Each criterion carries a tag (`@AC-1` through `@AC-5`) that tests, code comments, and review findings cite, which makes traceability searchable:
+The resulting story reads like this. Each criterion carries a tag (`@AC-1` through `@AC-12`) that tests, code comments, and review findings cite, which makes traceability searchable. The first five came from planning. The other seven came from an architecture review, each one a question the code had been answering by accident: what a missing field means, which time zone a bare timestamp is in, what a same-key reading with a different value does, and how long a dependency may take.
 
 ```gherkin
 Feature: Out-of-range sensor reading detection
   As a flight operations engineer
   I want every sensor reading classified against its calibrated limits
   So that anomalies are surfaced before they affect mission decisions
+
+  # Scenarios tagged @in-process inject faults, move the clock, or inspect the store, so they run
+  # only against the in-memory host. The staging run filters them out by tag.
+  #
+  # Scenarios that also run against staging stay well clear of time boundaries: the test agent's
+  # clock and the network delay are not the server's (ADR 0006). Readings whose time is not under
+  # test are stamped 30 seconds in the past.
 
   Background:
     Given sensor "TMP-07" has limits -40.0 to 125.0 degrees C
@@ -104,27 +111,27 @@ Feature: Out-of-range sensor reading detection
       | -40.000001 | Low            |
       | 125.000001 | High           |
 
-  @AC-2
+  @AC-2 @in-process
   Scenario: Non-finite reading is rejected, not classified
     When a reading of NaN is received
     Then the reading is rejected with error "NonFiniteValue"
     And no classification event is published
 
-  @AC-3
+  @AC-3 @in-process
   Scenario: Duplicate reading is idempotent
     Given a reading for "TMP-07" was accepted
     When a reading with the same sensor and timestamp arrives again
     Then no second event is published
 
-  @AC-4
+  @AC-4 @in-process
   Scenario: Event store is unavailable
     Given the event store is not reachable
     When a valid reading is received
     Then the API returns 503 with a Retry-After header
     And the reading is not partially persisted
 
-  @AC-5
-  Scenario Outline: Readings outside the freshness window are rejected
+  @AC-5 @in-process
+  Scenario Outline: Freshness boundaries are exact
     When a reading observed <offset> is received
     Then the reading is rejected with error "<error>"
 
@@ -132,7 +139,59 @@ Feature: Out-of-range sensor reading detection
       | offset                  | error           |
       | 5 minutes 1 second ago  | StaleReading    |
       | 3 seconds in the future | FutureTimestamp |
+
+  @AC-5
+  Scenario Outline: Readings far outside the freshness window are rejected
+    When a reading observed <offset> is received
+    Then the reading is rejected with error "<error>"
+
+    Examples:
+      | offset                   | error           |
+      | 10 minutes 0 seconds ago | StaleReading    |
+      | 60 seconds in the future | FutureTimestamp |
+
+  @AC-6
+  Scenario: A reading without a value is rejected
+    When a reading without a value is received
+    Then the request is rejected as invalid, naming "value"
+
+  @AC-7
+  Scenario: A timestamp without a UTC offset is rejected
+    When a reading stamped without a UTC offset is received
+    Then the request is rejected as invalid, naming "observedAt"
+
+  @AC-8
+  Scenario: A different value for a stored timestamp is a conflict
+    Given a reading for "TMP-07" was accepted
+    When a different value with the same sensor and timestamp arrives
+    Then the reading is rejected with status 409 and code "ConflictingReading"
+
+  @AC-9 @in-process
+  Scenario: The event store does not answer within the dependency budget
+    Given the event store does not answer
+    When a valid reading is received and the dependency budget runs out
+    Then the API returns 503 with a Retry-After header
+    And the error code is "DependencyTimeout"
+    And the reading is not partially persisted
+
+  @AC-10
+  Scenario: An older reading arrives after a newer one
+    Given a reading for "TMP-07" was accepted
+    When a reading observed 1 minute before it is received
+    Then the reading is classified "Nominal"
+
+  @AC-11
+  Scenario: A non-finite reading outside the window is rejected for its value
+    When a NaN reading observed 10 minutes ago is received
+    Then the reading is rejected with error "NonFiniteValue"
+
+  @AC-12
+  Scenario: A reading for an unregistered sensor is rejected
+    When a reading for sensor "NOPE-01" is received
+    Then the reading is rejected with status 404 and code "SensorNotFound"
 ```
+
+The two AC-5 outlines are deliberate. Exact boundaries belong where the clock is controlled; against a deployed service, a 1-second margin measured across two machines' clocks and a network hop fails at random, so the staging run checks readings far outside the window instead.
 
 Non-functional criteria belong in the story too, stated as numbers: p99 latency under 50 ms at 2,000 requests per second, zero data loss on pod termination, and graceful degradation when a dependency fails.
 
@@ -269,8 +328,8 @@ The endpoint in section 6 follows these rules, and the reviewer in section 9 che
 Each repository enforces three layers, strongest first:
 
 - **GitHub branch protection** (or a ruleset) on `main`: required PR, required reviewers, required Azure Pipelines status checks, linear history, no force pushes. This is the layer no agent can talk its way around, so it is the one that counts.
-- **Claude Code permissions** in the committed `.claude/settings.json`: allow the build, test, and local git commands, ask before every push, and deny force pushes and hard resets. Rules that constrain Bash arguments are best effort; Claude Code's own documentation notes that `git -C . push origin main` does not match `Bash(git push *)`. That is why branch protection sits underneath.
-- **A `PreToolUse` hook** that fires only on `git commit`. Exit code 2 blocks the tool call and returns the hook's stderr to Claude as the reason, so an unformatted or failing change never becomes a commit.
+- **Claude Code permissions** in the committed `.claude/settings.json`: allow the build, test, and local git commands, ask before every push, and deny force pushes and hard resets. Match the flag anywhere in the command: a rule for `git push --force *` alone lets `git push origin main --force`, `--force-with-lease`, and a `+main` refspec through. Rules that constrain Bash arguments are best effort; Claude Code's own documentation notes that `git -C . push origin main` does not match `Bash(git push *)`. That is why branch protection sits underneath.
+- **A `PreToolUse` hook** that gates `git commit`. Exit code 2 blocks the tool call and returns the hook's stderr to Claude as the reason, so an unformatted or failing change, or a commit on `main`, never happens. Have the script check the command it receives on stdin as well: some Claude Code versions ignore the `if` filter and run the hook before every Bash command, and a slow or failing gate then blocks all of them.
 
 ```json
 {
@@ -279,7 +338,9 @@ Each repository enforces three layers, strongest first:
               "Bash(git status)", "Bash(git diff *)", "Bash(git add *)", "Bash(git commit *)",
               "Bash(git switch *)", "Bash(git rebase *)"],
     "ask":   ["Bash(git push *)", "Bash(gh pr create *)"],
-    "deny":  ["Bash(git push --force *)", "Bash(git push -f *)", "Bash(git reset --hard *)"]
+    "deny":  ["Bash(git push --force*)", "Bash(git push * --force*)",
+              "Bash(git push -f*)", "Bash(git push * -f*)", "Bash(git push * +*)",
+              "Bash(git reset --hard*)"]
   },
   "hooks": {
     "PreToolUse": [
@@ -300,21 +361,44 @@ Each repository enforces three layers, strongest first:
 
 ```bash
 #!/usr/bin/env bash
-# PreToolUse hook: runs only for `git commit` (see "if" in settings.json).
+# PreToolUse hook for Bash. Claude Code sends the tool call as JSON on stdin. Only `git commit`
+# is gated; every other command passes straight through. The script filters for itself because
+# some Claude Code versions ignore the "if" in settings.json and run the hook for every command.
 # Exit 2 blocks the commit and returns stderr to Claude as the reason.
 set -uo pipefail
+
+input=$(cat)
+# `git`, optional arguments inside the same JSON string (escaped quotes allowed), then `commit`.
+if ! grep -Eq '(^|[^[:alnum:]_-])git[[:space:]](([^"]|\\")*[[:space:]])?commit([^[:alnum:]_-]|$)' <<<"$input"; then
+  exit 0
+fi
+
 cd "${CLAUDE_PROJECT_DIR:?}" || exit 2
+
+# CLAUDE.md: never commit to main; one branch per work item.
+branch=$(git branch --show-current)
+case "$branch" in
+  "")
+    echo "Commit blocked: detached HEAD. Commit on a feature/<id>-<slug> branch." >&2
+    exit 2 ;;
+  main | master)
+    echo "Commit blocked: '$branch' is protected. Create feature/<id>-<slug> first." >&2
+    exit 2 ;;
+esac
 
 if ! dotnet format --verify-no-changes >&2; then
   echo "Commit blocked: formatting drift. Run 'dotnet format' and retry." >&2
   exit 2
 fi
-if ! dotnet test tests/Ingestion.UnitTests --nologo >&2; then
+# Microsoft Testing Platform (global.json): options such as --nologo reach the test app, so pass none.
+if ! dotnet test tests/Ingestion.UnitTests >&2; then
   echo "Commit blocked: unit tests fail. Fix the code, not the tests." >&2
   exit 2
 fi
 exit 0
 ```
+
+Commit the script as executable (`git update-index --chmod=+x`). Without the bit, the hook fails to run on macOS and Linux clones, and a hook that cannot run does not block anything.
 
 ### Organization guardrails
 
@@ -439,20 +523,48 @@ public sealed class Result<T, TError>
 }
 ```
 
-Next come the validated types and the classifier for the story in section 2. `Limits` and `FreshnessPolicy` have private constructors and a `Create` factory that returns a `Result`, so an invalid instance cannot exist. Their properties are get-only, which also stops a `with` expression from sneaking past validation.
+Next come the error types, the validated types, and the classifier for the story in section 2 (three files in the repository, one block here). Three design choices carry most of the weight:
+
+- **Two closed error types, not one open one.** `ReadingRejection` is what `Classify` can return; `ConfigurationError` is what the validated types' factories return. A shared error type would let `Classify`'s signature admit setup errors it can never produce. Each base record has a private constructor, so only its nested cases can derive from it, and the shell maps exactly those. (C# records still expose a protected copy constructor, so this is a strong convention rather than a proof.) Codes use `nameof`, so they cannot drift from the type names.
+- **Valid by construction.** `Limits` and `FreshnessPolicy` have private constructors and a `Create` factory that returns a `Result`, so an invalid instance cannot exist. Their properties are get-only, which also stops a `with` expression from sneaking past validation.
+- **No swappable parameters.** A `Reading` groups the value with its timestamp. With two `DateTimeOffset` parameters side by side, swapping "observed at" and "now" compiles and quietly turns stale readings into future ones.
+
+The freshness window lives in code, not configuration, because it is a requirement (AC-5): changing it means changing the story.
 
 ```csharp
 namespace Ingestion.Domain;
 
-public enum Classification { Low, Nominal, High }
-
-public abstract record ReadingError(string Code)
+/// <summary>
+/// Why a reading was not classified. The private constructor admits only the nested cases, so the
+/// shell maps exactly these three.
+/// </summary>
+public abstract record ReadingRejection
 {
-    public sealed record NonFiniteValue() : ReadingError("NonFiniteValue");
-    public sealed record InvalidLimits(double Lower, double Upper) : ReadingError("InvalidLimits");
-    public sealed record InvalidPolicy(TimeSpan MaxAge, TimeSpan MaxSkew) : ReadingError("InvalidPolicy");
-    public sealed record FutureTimestamp(TimeSpan Skew) : ReadingError("FutureTimestamp");
-    public sealed record StaleReading(TimeSpan Age) : ReadingError("StaleReading");
+    private ReadingRejection(string code) => Code = code;
+
+    /// <summary>Stable identifier, safe to return to clients and to use in logs and metrics.</summary>
+    public string Code { get; }
+
+    /// <summary>NaN or an infinity (AC-2).</summary>
+    public sealed record NonFiniteValue() : ReadingRejection(nameof(NonFiniteValue));
+
+    /// <summary>Observed further ahead of server time than the policy allows (AC-5).</summary>
+    public sealed record FutureTimestamp(TimeSpan Skew, TimeSpan MaxSkew) : ReadingRejection(nameof(FutureTimestamp));
+
+    /// <summary>Observed longer ago than the policy allows (AC-5).</summary>
+    public sealed record StaleReading(TimeSpan Age, TimeSpan MaxAge) : ReadingRejection(nameof(StaleReading));
+}
+
+/// <summary>Why a validated type could not be created: a configuration defect, never a response to a reading.</summary>
+public abstract record ConfigurationError
+{
+    private ConfigurationError(string code) => Code = code;
+
+    public string Code { get; }
+
+    public sealed record InvalidLimits(double Lower, double Upper) : ConfigurationError(nameof(InvalidLimits));
+
+    public sealed record InvalidPolicy(TimeSpan MaxAge, TimeSpan MaxSkew) : ConfigurationError(nameof(InvalidPolicy));
 }
 
 /// <summary>Calibrated limits. The only way to get one is valid: finite and ordered.</summary>
@@ -463,10 +575,10 @@ public sealed record Limits
     public double Lower { get; }
     public double Upper { get; }
 
-    public static Result<Limits, ReadingError> Create(double lower, double upper) =>
+    public static Result<Limits, ConfigurationError> Create(double lower, double upper) =>
         double.IsFinite(lower) && double.IsFinite(upper) && lower <= upper
             ? new Limits(lower, upper)
-            : new ReadingError.InvalidLimits(lower, upper);
+            : new ConfigurationError.InvalidLimits(lower, upper);
 }
 
 /// <summary>How old a reading may be, and how far ahead of our clock it may claim to be.</summary>
@@ -477,32 +589,48 @@ public sealed record FreshnessPolicy
     public TimeSpan MaxAge { get; }
     public TimeSpan MaxSkew { get; }
 
-    public static Result<FreshnessPolicy, ReadingError> Create(TimeSpan maxAge, TimeSpan maxSkew) =>
+    public static Result<FreshnessPolicy, ConfigurationError> Create(TimeSpan maxAge, TimeSpan maxSkew) =>
         maxAge > TimeSpan.Zero && maxSkew >= TimeSpan.Zero
             ? new FreshnessPolicy(maxAge, maxSkew)
-            : new ReadingError.InvalidPolicy(maxAge, maxSkew);
+            : new ConfigurationError.InvalidPolicy(maxAge, maxSkew);
 }
+
+/// <summary>
+/// The freshness window the story requires (AB#1234, AC-5). These are requirements, not settings:
+/// changing them means changing the story.
+/// </summary>
+public static class FreshnessRequirements
+{
+    public static TimeSpan MaxAge { get; } = TimeSpan.FromMinutes(5);
+    public static TimeSpan MaxSkew { get; } = TimeSpan.FromSeconds(2);
+}
+
+/// <summary>Ordered from lowest to highest, so a higher reading never gets a lower classification.</summary>
+public enum Classification { Low, Nominal, High }
+
+/// <summary>A sensor value as observed. Not validated: deciding whether it is acceptable is the classifier's job.</summary>
+public readonly record struct Reading(double Value, DateTimeOffset ObservedAt);
 
 public static class RangeClassifier
 {
     // Pure: same inputs, same output. No clock, no I/O, no expected-failure exceptions.
-    public static Result<Classification, ReadingError> Classify(
-        double value, Limits limits, DateTimeOffset observedAt,
-        DateTimeOffset now, FreshnessPolicy policy)
+    public static Result<Classification, ReadingRejection> Classify(
+        Reading reading, Limits limits, FreshnessPolicy policy, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(limits);   // a null here is a defect, not an input
         ArgumentNullException.ThrowIfNull(policy);
 
-        if (!double.IsFinite(value))
-            return new ReadingError.NonFiniteValue();                  // AC-2
+        // Value before time (AC-11).
+        if (!double.IsFinite(reading.Value))
+            return new ReadingRejection.NonFiniteValue();                                     // AC-2
 
-        var age = now - observedAt;
-        if (age < -policy.MaxSkew) return new ReadingError.FutureTimestamp(-age);  // AC-5
-        if (age > policy.MaxAge) return new ReadingError.StaleReading(age);      // AC-5
+        var age = now - reading.ObservedAt;
+        if (age < -policy.MaxSkew) return new ReadingRejection.FutureTimestamp(-age, policy.MaxSkew);  // AC-5
+        if (age > policy.MaxAge) return new ReadingRejection.StaleReading(age, policy.MaxAge);         // AC-5
 
         // Limits are inclusive (AC-1).
-        return value < limits.Lower ? Classification.Low
-             : value > limits.Upper ? Classification.High
+        return reading.Value < limits.Lower ? Classification.Low
+             : reading.Value > limits.Upper ? Classification.High
              : Classification.Nominal;
     }
 }
@@ -515,21 +643,18 @@ A few rules make this style hold across a whole service:
 - **Time is a parameter.** The shell injects .NET's `TimeProvider`; the core receives a plain `DateTimeOffset`. Tests never sleep or depend on the wall clock.
 - **Expected failures are values.** `Result<T, TError>` forces every caller to handle every error case. Exceptions are reserved for defects, such as a null argument that nullable analysis should already have prevented.
 - **Make illegal states unrepresentable.** Parse raw input into validated types at the boundary, so the core never sees an invalid `Limits` or `FreshnessPolicy`.
-- **The shell stays thin.** It reads the clock, calls `Classify`, persists, and maps each `ReadingError` to an HTTP status. It makes no decisions of its own.
+- **Dependencies answer with values too.** A store outage is AC-4, an expected and specified outcome, so the store returns it as `AppendOutcome.Unavailable` rather than throwing. The same closed type carries `Inserted`, `Duplicate`, and `Conflict`, so the endpoint cannot confuse a retry with a conflicting write.
+- **The shell stays thin.** It validates the request, reads the clock, calls `Classify`, persists, and maps each rejection and store outcome to an HTTP status. It makes no decisions of its own.
 
-Here is that shell, a vertical slice in `Features/Ingest`. Every dependency is explicit, every outcome has a status code, and an error the switch does not map fails loudly instead of silently returning 200:
+Here is that shell, a vertical slice in `Features/Ingest`. First the ports it depends on. `AppendOutcome.Of` holds the idempotency rule, so every store adapter resolves a write the same way:
 
 ```csharp
-using System.Diagnostics;
 using Ingestion.Domain;
-using Microsoft.AspNetCore.Http.HttpResults;
-using Microsoft.AspNetCore.Mvc;
 
 namespace Ingestion.Api.Features.Ingest;
 
-public sealed record IngestReadingRequest(double Value, DateTimeOffset ObservedAt);
-public sealed record IngestReadingResponse(Classification Classification);
 public sealed record Sensor(string Id, Limits Limits);
+
 public sealed record ClassifiedReading(
     string SensorId, double Value, DateTimeOffset ObservedAt, Classification Classification);
 
@@ -540,73 +665,173 @@ public interface ISensorRegistry
 
 public interface IReadingStore
 {
-    /// <summary>Writes the reading and its outbox event in one transaction.
-    /// Idempotent on (SensorId, ObservedAt): a duplicate is a no-op.</summary>
-    /// <exception cref="StoreUnavailableException">The store cannot be reached.</exception>
-    Task AppendAsync(ClassifiedReading reading, CancellationToken ct);
+    /// <summary>
+    /// Writes the reading and its outbox event in one transaction (ADR 0001), keyed on
+    /// (SensorId, ObservedAt). Expected outcomes are values, including an outage (ADR 0004);
+    /// an exception means a defect. Resolve a write against the stored row with
+    /// <see cref="AppendOutcome.Of"/> so every adapter applies the same idempotency rule.
+    /// </summary>
+    Task<AppendOutcome> AppendAsync(ClassifiedReading reading, CancellationToken ct);
 }
 
-public sealed class StoreUnavailableException(string message, Exception innerException)
-    : Exception(message, innerException);
-
-public static class IngestEndpoint
+/// <summary>What the store did with a reading. Closed: the private constructor admits only the nested cases.</summary>
+public abstract record AppendOutcome
 {
-    public const string WritePolicy = "readings:write";
+    private AppendOutcome() { }
 
-    public static IEndpointRouteBuilder MapIngestReadings(this IEndpointRouteBuilder app)
+    /// <summary>The first reading for this sensor and timestamp.</summary>
+    public sealed record Inserted : AppendOutcome;
+
+    /// <summary>The same value was already stored for this sensor and timestamp (AC-3).</summary>
+    public sealed record Duplicate(Classification StoredClassification) : AppendOutcome;
+
+    /// <summary>A different value is stored for this sensor and timestamp; nothing changed (AC-8).</summary>
+    public sealed record Conflict : AppendOutcome;
+
+    /// <summary>The store could not be reached; nothing was written (AC-4).</summary>
+    public sealed record Unavailable : AppendOutcome;
+
+    /// <summary>
+    /// The outcome of writing <paramref name="attempted"/> when <paramref name="stored"/> is the row
+    /// that holds its key afterwards (the attempted row itself when the write won).
+    /// </summary>
+    public static AppendOutcome Of(ClassifiedReading attempted, ClassifiedReading stored)
     {
-        app.MapPost("/sensors/{sensorId}/readings", HandleAsync)
-           .RequireAuthorization(WritePolicy);                    // no anonymous writes
-        return app;
+        ArgumentNullException.ThrowIfNull(attempted);
+        ArgumentNullException.ThrowIfNull(stored);
+
+        if (ReferenceEquals(attempted, stored))
+            return new Inserted();
+        return attempted.Value.Equals(stored.Value) ? new Duplicate(stored.Classification) : new Conflict();
     }
-
-    // Imperative shell: gather inputs, call the pure core, translate the outcome. No rules here.
-    private static async Task<IResult> HandleAsync(
-        [FromRoute] string sensorId,
-        [FromBody] IngestReadingRequest request,
-        [FromServices] ISensorRegistry registry,
-        [FromServices] IReadingStore store,
-        [FromServices] TimeProvider clock,
-        [FromServices] FreshnessPolicy policy,
-        HttpResponse response,
-        CancellationToken ct)
-    {
-        var sensor = await registry.FindAsync(sensorId, ct);
-        if (sensor is null)
-            return TypedResults.NotFound();
-
-        var outcome = RangeClassifier.Classify(
-            request.Value, sensor.Limits, request.ObservedAt, clock.GetUtcNow(), policy);
-
-        if (!outcome.TryGetValue(out var classification, out var error))
-            return ToProblem(error);
-
-        try
-        {
-            await store.AppendAsync(
-                new ClassifiedReading(sensorId, request.Value, request.ObservedAt, classification), ct);
-            return TypedResults.Ok(new IngestReadingResponse(classification));
-        }
-        catch (StoreUnavailableException)
-        {
-            response.Headers.RetryAfter = "5";                                        // AC-4
-            return TypedResults.Problem(
-                statusCode: StatusCodes.Status503ServiceUnavailable, title: "EventStoreUnavailable");
-        }
-    }
-
-    private static ProblemHttpResult ToProblem(ReadingError error) => error switch
-    {
-        ReadingError.NonFiniteValue or ReadingError.FutureTimestamp or ReadingError.StaleReading =>
-            TypedResults.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: error.Code),
-        _ => throw new UnreachableException($"Classifier returned unmapped error '{error.Code}'."),
-    };
 }
 ```
 
-One outlier lives at the transport layer. JSON has no NaN or Infinity token, so a bare `NaN` is rejected by the serializer with a 400 before any rule runs. ASP.NET Core's web defaults (`AllowReadingFromString`) do accept the quoted strings `"NaN"` and `"-Infinity"`, and those reach the domain and return 422 `NonFiniteValue`, exactly as AC-2 requires. Know which behavior you have, and write the end-to-end test for it. If the contract should also refuse numbers sent as strings, set `NumberHandling` explicitly; assigning it replaces the web default rather than adding to it.
+Then the endpoint. Every dependency is explicit, every outcome has a status code, every dependency call shares one time budget measured on the injected clock, and an outcome the switch does not map fails loudly instead of silently returning 200. The handler's return type documents 200 and 400 in the OpenAPI document, and logs and metrics are derived from whatever it returns, so no branch can skip them:
 
-The composition root keeps those defaults, serializes enums by name, fails fast at startup if its own configuration is invalid, and defines the write policy the API rules in section 4 require. A caller with no token gets 401, and a token without the `readings:write` scope gets 403:
+```csharp
+using System.Diagnostics;
+using System.Globalization;
+using Ingestion.Api.Security;
+using Ingestion.Domain;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+
+namespace Ingestion.Api.Features.Ingest;
+
+public static class IngestEndpoint
+{
+    public static IEndpointRouteBuilder MapIngestReadings(this IEndpointRouteBuilder app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+        var policy = app.ServiceProvider.GetRequiredService<FreshnessPolicy>();
+
+        // 200 and 400 are documented by the handler's return type; the rest are problem details (ADR 0002).
+        app.MapPost("/sensors/{sensorId}/readings", HandleAsync)
+           .RequireAuthorization(ReadingsAuthorization.WritePolicy)   // no anonymous writes (ADR 0003)
+           .WithName("IngestReading")
+           .WithTags("Readings")
+           .WithSummary("Classify a sensor reading against its calibrated limits and store it.")
+           .WithDescription(Describe(policy))
+           .ProducesProblem(StatusCodes.Status404NotFound)
+           .ProducesProblem(StatusCodes.Status409Conflict)
+           .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+           .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+        return app;
+    }
+
+    /// <summary>The handler's collaborators, resolved from the container.</summary>
+    internal readonly record struct Services(
+        [FromServices] ISensorRegistry Registry,
+        [FromServices] IReadingStore Store,
+        [FromServices] TimeProvider Clock,
+        [FromServices] FreshnessPolicy Policy,
+        [FromServices] IOptions<IngestionOptions> Options,
+        [FromServices] IngestTelemetry Telemetry);
+
+    private static async Task<Results<Ok<IngestReadingResponse>, ValidationProblem, ProblemHttpResult>> HandleAsync(
+        [FromRoute] string sensorId,
+        [FromBody] IngestReadingRequest request,
+        [AsParameters] Services services,
+        HttpResponse response,
+        CancellationToken ct)
+    {
+        var result = await IngestAsync(sensorId, request, services, response, ct);
+        services.Telemetry.Record(sensorId, result.Result);
+        return result;
+    }
+
+    // Imperative shell: validate, load, call the pure core, persist, translate. No rules here.
+    private static async Task<Results<Ok<IngestReadingResponse>, ValidationProblem, ProblemHttpResult>> IngestAsync(
+        string sensorId, IngestReadingRequest request, Services services, HttpResponse response, CancellationToken ct)
+    {
+        if (!request.Validate().TryGetValue(out var reading, out var invalid))
+            return IngestProblems.InvalidRequest(invalid);                                    // AC-6, AC-7
+
+        var options = services.Options.Value;
+
+        // One budget for every dependency call, measured on the injected clock (AC-9).
+        using var budget = new CancellationTokenSource(options.DependencyBudget, services.Clock);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token);
+        try
+        {
+            var sensor = await services.Registry.FindAsync(sensorId, deadline.Token);
+            if (sensor is null)
+                return IngestProblems.SensorNotFound();                                       // AC-12
+
+            var outcome = RangeClassifier.Classify(reading, sensor.Limits, services.Policy, services.Clock.GetUtcNow());
+            if (!outcome.TryGetValue(out var classification, out var rejection))
+                return IngestProblems.Rejected(rejection);                                    // AC-2, AC-5, AC-11
+
+            // The registry's ID, not the route's: a case-insensitive registry must not split the idempotency key.
+            var started = services.Clock.GetTimestamp();
+            var appended = await services.Store.AppendAsync(
+                new ClassifiedReading(sensor.Id, reading.Value, reading.ObservedAt, classification), deadline.Token);
+            services.Telemetry.StoreAnswered(appended, services.Clock.GetElapsedTime(started));
+
+            return appended switch
+            {
+                AppendOutcome.Inserted => TypedResults.Ok(new IngestReadingResponse(classification)),
+                AppendOutcome.Duplicate duplicate =>
+                    TypedResults.Ok(new IngestReadingResponse(duplicate.StoredClassification)),   // AC-3
+                AppendOutcome.Conflict => IngestProblems.ConflictingReading(),                  // AC-8
+                AppendOutcome.Unavailable => IngestProblems.StoreUnavailable(response, options.RetryAfter),  // AC-4
+                _ => throw new UnreachableException($"Unmapped append outcome '{appended}'."),
+            };
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            return IngestProblems.DependencyTimeout(response, options.RetryAfter);            // AC-9
+        }
+    }
+
+    private static string Describe(FreshnessPolicy policy) =>
+        "Limits are inclusive (AC-1). Non-finite values are rejected (AC-2); send them as the strings " +
+        "\"NaN\", \"Infinity\", or \"-Infinity\". Repeating a reading (same sensor, timestamp, and value) is " +
+        "idempotent (AC-3); the same sensor and timestamp with a different value is a conflict (AC-8). " +
+        $"Readings more than {Humanize(policy.MaxAge)} old or {Humanize(policy.MaxSkew)} ahead of server " +
+        "time are rejected (AC-5). observedAt must carry 'Z' or a UTC offset (AC-7).";
+
+    private static string Humanize(TimeSpan span) =>
+        span.Ticks % TimeSpan.TicksPerMinute == 0 ? Count(span.TotalMinutes, "minute") : Count(span.TotalSeconds, "second");
+
+    private static string Count(double amount, string unit) =>
+        string.Create(CultureInfo.InvariantCulture, $"{amount:0.###} {unit}{(amount == 1 ? "" : "s")}");
+}
+```
+
+`IngestProblems` turns each outcome into RFC 9457 problem details with a stable `code`, a `type` URL, a human `detail`, and the numbers behind a rejection (`ageSeconds`, `maxAgeSeconds`), and it never echoes request values (ADR 0002). The exception handler and status code pages give the framework's own errors (400, 401, 403, 415, 500) the same shape, and a 500 carries no exception text.
+
+Several outliers live at the transport layer, where the domain never sees them:
+
+- **NaN in JSON.** JSON has no NaN or Infinity token, so a bare `NaN` is rejected by the serializer with a 400 before any rule runs. ASP.NET Core's web defaults (`AllowReadingFromString`) do accept the quoted strings `"NaN"` and `"-Infinity"`, and those reach the domain and return 422 `NonFiniteValue`, exactly as AC-2 requires. If the contract should also refuse numbers sent as strings, set `NumberHandling` explicitly; assigning it replaces the web default rather than adding to it.
+- **Missing fields.** A positional record binds a missing `value` as `0.0`, which is a valid, Nominal reading. The request type therefore declares both fields nullable, and `IngestReadingRequest.Validate` returns a 400 naming each missing field (AC-6).
+- **Timestamps without an offset.** The serializer reads `"2026-09-27T14:00:00"` in the server's local time zone, so the same request passes on a UTC host and fails on a developer's laptop. `observedAt` is read as text and must carry `Z` or a UTC offset (AC-7).
+
+Know which behavior you have, and write the end-to-end test for each one.
+
+The composition root keeps those defaults, serializes enums by name, and fails fast at startup when its own configuration is invalid: the freshness window comes from the story, the operational settings are validated, and a service without a store provider or, outside Development, without bearer settings refuses to start. The write policy accepts the `readings:write` scope for people and the `Readings.Write` app role for services, reading the space-separated `scp` claim the way Microsoft Entra ID issues it. A caller with no token gets 401, and a token with neither gets 403:
 
 ```csharp
 // Keep the web defaults (AllowReadingFromString already admits "NaN" and "Infinity");
@@ -616,14 +841,25 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 
 builder.Services.AddProblemDetails();
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton(
-    FreshnessPolicy.Create(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(2))
-        .Match(p => p, e => throw new InvalidOperationException($"Invalid freshness policy: {e}")));
 
-// Authentication (for example, Microsoft Entra ID bearer tokens) is registered per environment.
-builder.Services.AddAuthorization(o => o.AddPolicy(IngestEndpoint.WritePolicy, p => p
-    .RequireAuthenticatedUser()
-    .RequireClaim("scope", IngestEndpoint.WritePolicy)));
+// Requirement values come from the story (AC-5); operational values from configuration (ADR 0007).
+builder.Services.AddSingleton(
+    FreshnessPolicy.Create(FreshnessRequirements.MaxAge, FreshnessRequirements.MaxSkew)
+        .OrThrowAtStartup("freshness policy"));
+builder.Services.AddOptions<IngestionOptions>()
+    .BindConfiguration(IngestionOptions.SectionName, o => o.ErrorOnUnknownConfiguration = true)
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
+// Writes need the readings:write scope (people) or the Readings.Write app role (services), from
+// bearer tokens such as Microsoft Entra ID's. Fails closed: see ADR 0003.
+builder.Services.AddReadingsAuthorization(builder.Environment);
+
+// Adapters. The registry is read and checked from configuration at startup. The store is chosen by
+// Storage:Provider; no durable one exists yet, so production refuses to start (ADR 0004).
+var sensors = InMemorySensorRegistry.FromConfiguration(builder.Configuration.GetSection("Sensors"));
+builder.Services.AddSingleton<ISensorRegistry>(sensors);
+builder.Services.AddReadingStorage(builder.Configuration);   // also registers the store's readiness check
 ```
 
 When asking Claude to implement a slice, include the acceptance criteria and the outlier checklist, and tell it to write the failing tests first. The tests become the contract Claude must satisfy, which prevents it from quietly narrowing the requirement to fit its code.
@@ -656,13 +892,14 @@ namespace Ingestion.UnitTests;
 
 public sealed class RangeClassifierTests
 {
+    // The story's numbers, restated rather than read from FreshnessRequirements (ADR 0007).
     private static readonly DateTimeOffset T0 = new(2026, 9, 27, 14, 0, 0, TimeSpan.Zero);
     private static readonly Limits Tmp07 = Limits.Create(-40.0, 125.0).ShouldSucceed();
     private static readonly FreshnessPolicy Policy =
         FreshnessPolicy.Create(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(2)).ShouldSucceed();
 
-    private static Result<Classification, ReadingError> Classify(double value) =>
-        RangeClassifier.Classify(value, Tmp07, T0, T0, Policy);
+    private static Result<Classification, ReadingRejection> Classify(double value, int offsetSeconds = 0) =>
+        RangeClassifier.Classify(new Reading(value, T0.AddSeconds(offsetSeconds)), Tmp07, Policy, now: T0);
 
     [Theory]
     [InlineData(-40.0, Classification.Nominal)]        // AC-1: lower limit is inclusive
@@ -678,18 +915,54 @@ public sealed class RangeClassifierTests
     [InlineData(double.PositiveInfinity)]
     [InlineData(double.NegativeInfinity)]
     public void Non_finite_values_are_rejected(double value) =>                  // AC-2
-        Assert.IsType<ReadingError.NonFiniteValue>(Classify(value).ShouldFail());
+        Assert.IsType<ReadingRejection.NonFiniteValue>(Classify(value).ShouldFail());
 
     [Theory]
-    [InlineData(-301, typeof(ReadingError.StaleReading))]      // 5 min 1 s old
-    [InlineData(-300, null)]                                   // exactly 5 min old: accepted
-    [InlineData(2, null)]                                      // exactly 2 s ahead: accepted
-    [InlineData(3, typeof(ReadingError.FutureTimestamp))]      // 3 s ahead
-    public void Freshness_window_is_inclusive(int offsetSeconds, Type? expectedError)   // AC-5
+    [InlineData(-301, typeof(ReadingRejection.StaleReading))]      // 5 min 1 s old
+    [InlineData(-300, null)]                                       // exactly 5 min old: accepted
+    [InlineData(2, null)]                                          // exactly 2 s ahead: accepted
+    [InlineData(3, typeof(ReadingRejection.FutureTimestamp))]      // 3 s ahead
+    public void Freshness_window_is_inclusive(int offsetSeconds, Type? expectedRejection)   // AC-5
     {
-        var result = RangeClassifier.Classify(20.0, Tmp07, T0.AddSeconds(offsetSeconds), T0, Policy);
-        if (expectedError is null) Assert.True(result.IsSuccess);
-        else Assert.IsType(expectedError, result.ShouldFail());
+        var result = Classify(20.0, offsetSeconds);
+        if (expectedRejection is null) Assert.True(result.IsSuccess);
+        else Assert.IsType(expectedRejection, result.ShouldFail());
+    }
+
+    [Fact]
+    public void A_stale_rejection_reports_the_age_and_the_limit()               // AC-5
+    {
+        var rejection = Assert.IsType<ReadingRejection.StaleReading>(Classify(20.0, -301).ShouldFail());
+        Assert.Equal(TimeSpan.FromSeconds(301), rejection.Age);
+        Assert.Equal(TimeSpan.FromMinutes(5), rejection.MaxAge);
+    }
+
+    [Fact]
+    public void A_future_rejection_reports_the_skew_and_the_limit()             // AC-5
+    {
+        var rejection = Assert.IsType<ReadingRejection.FutureTimestamp>(Classify(20.0, 3).ShouldFail());
+        Assert.Equal(TimeSpan.FromSeconds(3), rejection.Skew);
+        Assert.Equal(TimeSpan.FromSeconds(2), rejection.MaxSkew);
+    }
+
+    [Theory]
+    [InlineData(double.NaN, -301)]                                 // stale and non-finite
+    [InlineData(double.PositiveInfinity, 3)]                       // future and non-finite
+    public void Value_checks_come_before_time_checks(double value, int offsetSeconds) =>   // AC-11
+        Assert.IsType<ReadingRejection.NonFiniteValue>(Classify(value, offsetSeconds).ShouldFail());
+
+    [Fact]
+    public void Freshness_requirements_match_the_story() =>                      // AC-5
+        Assert.Equal(
+            (TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(2)),
+            (FreshnessRequirements.MaxAge, FreshnessRequirements.MaxSkew));
+
+    [Fact]
+    public void Rejection_codes_are_stable()                                     // ADR 0002: part of the contract
+    {
+        Assert.Equal("NonFiniteValue", new ReadingRejection.NonFiniteValue().Code);
+        Assert.Equal("FutureTimestamp", new ReadingRejection.FutureTimestamp(TimeSpan.Zero, TimeSpan.Zero).Code);
+        Assert.Equal("StaleReading", new ReadingRejection.StaleReading(TimeSpan.Zero, TimeSpan.Zero).Code);
     }
 
     [Property]
@@ -721,7 +994,9 @@ FsCheck's default `double` generator emits NaN, an infinity, `MaxValue`, `MinVal
 
 Test names use underscores so they read as specifications. The recommended analyzers flag that (CA1707) and ask for the FsCheck property methods to be static (CA1822), so switch both rules off in the test folder's `.editorconfig` rather than weakening analysis for production code.
 
-Coverage alone is a weak signal; a line can execute without its result ever being checked. Mutation testing is the stronger gate. Stryker changes `<` to `<=`, flips booleans, and removes statements, then confirms a test fails for each change. A surviving mutant is a requirement nobody is verifying. Against the code above, flipping any of the four comparisons, or narrowing the finite check to catch only NaN or only infinities, makes at least one test fail.
+Coverage alone is a weak signal; a line can execute without its result ever being checked. Mutation testing is the stronger gate. Stryker changes `<` to `<=`, flips booleans, and removes statements, then confirms a test fails for each change. A surviving mutant is a requirement nobody is verifying. Against the code above, flipping any of the four comparisons, or narrowing the finite check to catch only NaN or only infinities, makes at least one test fail. Stryker scores the core at 100%.
+
+Check that the gate measures anything at all. With xUnit v3, Stryker's default VSTest runner cannot switch mutants on inside the test process: it reports every mutant as survived and a score of 0%, and a gate that has only ever failed, or never run, protects nothing. Stryker 5's Microsoft Testing Platform runner works, and it needs the suites on MTP: opt `dotnet test` in through `global.json` (`"test": { "runner": "Microsoft.Testing.Platform" }`), use the `xunit.v3` package rather than `xunit.v3.mtp-off`, and select the runner in `stryker-config.json`. The mutants that survived that first honest run were real gaps: nothing asserted the error codes or the age and skew a rejection reports.
 
 Claude is effective at every layer, with one caution: it will make tests pass by weakening them if you let it. Two rules prevent that. First, tests derived from acceptance criteria are written and reviewed before implementation, and Claude is told not to modify them without approval. Second, surviving mutants go back to Claude as specific tasks: "Mutant 14 survived: changing `>` to `>=` on line 31 is undetected. Add a test that kills it."
 
@@ -746,7 +1021,8 @@ resources:
     type: github
     name: contoso/pipeline-templates
     endpoint: github-contoso          # GitHub service connection
-    ref: refs/tags/v3.2.0             # pinned; template changes ship as reviewed releases
+    ref: refs/tags/v3.3.0             # pinned; template changes ship as reviewed releases
+                                      # v3.3.0: appSettings on deploy-api, alert-watching canary with rollback
 
 variables:
   config: Release
@@ -768,23 +1044,32 @@ stages:
       displayName: Formatting gate
     - script: dotnet build -c $(config) --no-restore -warnaserror
       displayName: Build, warnings as errors
-    - task: DotNetCoreCLI@2
+    # Suites run on Microsoft Testing Platform (global.json), so plain dotnet test replaces the
+    # DotNetCoreCLI task, which adds VSTest-only arguments.
+    - script: >
+        dotnet test --project tests/Ingestion.UnitTests -c $(config) --no-build
+        --results-directory $(Agent.TempDirectory)/unit --report-xunit-trx
+        --coverage --coverage-output-format cobertura --coverage-output coverage.cobertura.xml
       displayName: Unit and property tests
-      inputs:
-        command: test
-        projects: tests/**/*.UnitTests.csproj
-        arguments: -c $(config) --no-build --collect "XPlat Code Coverage"
     - script: dotnet stryker --break-at 80
       displayName: Mutation gate (score of 80 or better)
       workingDirectory: tests/Ingestion.UnitTests
-    - task: DotNetCoreCLI@2
-      displayName: Integration and contract tests (Testcontainers)
+    - script: |
+        set -euo pipefail
+        dotnet test --project tests/Ingestion.IntegrationTests -c $(config) --no-build \
+          --results-directory $(Agent.TempDirectory)/integration --report-xunit-trx
+        dotnet test --project tests/Ingestion.AcceptanceTests -c $(config) --no-build \
+          --results-directory $(Agent.TempDirectory)/acceptance --report-xunit-trx
+      displayName: Integration and in-process acceptance tests
+    # Staging runs these exact bits (ADR 0006). This is the Release build output, not dotnet publish:
+    # publishing a test project copies netstandard assemblies from the test SDK that break xUnit discovery.
+    - publish: tests/Ingestion.AcceptanceTests/bin/$(config)/net10.0
+      artifact: acceptance-tests
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
       inputs:
-        command: test
-        projects: |
-          tests/**/*.IntegrationTests.csproj
-          tests/**/*.ContractTests.csproj
-        arguments: -c $(config) --no-build
+        testResultsFormat: VSTest
+        testResultsFiles: $(Agent.TempDirectory)/**/*.trx
     - task: PublishCodeCoverageResults@2
       condition: succeededOrFailed()
       inputs:
@@ -809,24 +1094,56 @@ stages:
           - template: steps/deploy-api.yml@templates
             parameters:
               package: $(Pipeline.Workspace)/api
+              # No durable store exists yet; staging accepts losing readings on restart (ADR 0004).
+              appSettings: -Storage__Provider InMemory
   - job: Acceptance
     dependsOn: Deploy
     pool:
       vmImage: ubuntu-latest
     variables:
-    - group: ingestion-staging        # provides stagingBaseUrl
+    - group: ingestion-staging        # provides stagingBaseUrl and stagingAccessToken
     steps:
     - task: UseDotNet@2
       inputs:
         useGlobalJson: true
-    - task: DotNetCoreCLI@2
+    - download: current
+      artifact: acceptance-tests
+    # xUnit v3 test projects are executables, so the promoted build runs directly (xUnit's own options).
+    - script: >
+        dotnet Ingestion.AcceptanceTests.dll -trait- "Category=in-process"
+        -result-trx $(Agent.TempDirectory)/acceptance-staging.trx
       displayName: Gherkin acceptance suite against staging
-      inputs:
-        command: test
-        projects: tests/**/*.AcceptanceTests.csproj
+      workingDirectory: $(Pipeline.Workspace)/acceptance-tests
       env:
         INGESTION_BASE_URL: $(stagingBaseUrl)
+        INGESTION_ACCESS_TOKEN: $(stagingAccessToken)   # secret variable in the group
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFormat: VSTest
+        testResultsFiles: $(Agent.TempDirectory)/acceptance-staging.trx
+  - job: LoadTest
+    displayName: p99 under 50 ms at 2,000 requests per second
+    dependsOn: Acceptance
+    pool:
+      vmImage: ubuntu-latest
+    variables:
+    - group: ingestion-staging        # also provides loadTestResource and loadTestResourceGroup
+    steps:
+    - task: AzureLoadTest@1
+      displayName: Azure Load Testing (fails on p99 over 50 ms or errors over 1%)
+      inputs:
+        azureSubscription: $(azureSubscription)
+        loadTestConfigFile: tests/load/ingestion-p99.yaml
+        loadTestResource: $(loadTestResource)
+        resourceGroup: $(loadTestResourceGroup)
+        env: |
+          [ { "name": "INGESTION_BASE_URL", "value": "$(stagingBaseUrl)" } ]
+        secrets: |
+          [ { "name": "INGESTION_ACCESS_TOKEN", "value": "$(stagingAccessToken)" } ]
 
+# Blocked by design until a durable store adapter exists (ADR 0004): production sets no
+# Storage:Provider, so the app refuses to start, the canary's alerts fire, and the canary rolls back.
 - stage: Production
   dependsOn: Staging
   condition: and(succeeded(), eq(variables.isMain, true))
@@ -846,10 +1163,12 @@ stages:
 
 A few details in that file are easy to get wrong:
 
-- **One project per `dotnet test` call.** Passing two project paths fails with `MSB1008: Only one project can be specified`. The `DotNetCoreCLI@2` task accepts globs, runs each match, and publishes the results to the run automatically.
-- **Locked restore needs lock files.** `--locked-mode` works only when `RestorePackagesWithLockFile` is enabled and each `packages.lock.json` is committed.
+- **Microsoft Testing Platform changes `dotnet test`.** With the runner opted in through `global.json`, `dotnet test` takes `--project`, one project per call, and forwards unknown options such as `--nologo` to the test app, which can then run zero tests and exit with code 5. The `DotNetCoreCLI@2` task adds VSTest-only arguments, so plain `script` steps run the suites, xUnit writes TRX itself (`--report-xunit-trx`), and coverage comes from `Microsoft.Testing.Extensions.CodeCoverage` (`--coverage`), because `coverlet.collector` is a VSTest data collector.
+- **Locked restore needs lock files.** `--locked-mode` works only when `RestorePackagesWithLockFile` is enabled and each `packages.lock.json` is committed, including the ones a new package reference changes transitively.
 - **Use the current coverage task.** `PublishCodeCoverageResults@1` is deprecated; version 2 reads Cobertura output directly.
 - **Deployment jobs download artifacts; they do not check out code.** The staging and production jobs receive the `api` artifact under `$(Pipeline.Workspace)`, which is what makes "build once, promote everywhere" true.
+- **Promote the tests too.** The staging job runs the acceptance suite the Build stage compiled, not a fresh Debug build. Ship the Release build output: `dotnet publish` on a test project copies netstandard assemblies from the test SDK that redefine `IAsyncDisposable`, and xUnit discovery then fails with a `TypeLoadException`. Run directly, an xUnit v3 test app takes xUnit's own options (`-trait-`, `-result-trx`).
+- **A gate that cannot pass is a decision.** Production sets no `Storage:Provider`, so until a durable store exists the service refuses to start there and the canary rolls back. That is the fail-closed answer to "zero data loss", written down in ADR 0004, not an accident to work around.
 
 Claude can create the pipeline definition that points at the file, so no one clicks through the portal:
 
@@ -918,7 +1237,7 @@ A disciplined visual review follows the specification, not the diff order:
 
 1. **Trace each acceptance criterion** from the Gherkin scenario, to the test that proves it, to the lines that implement it. A criterion with no test, or a test or behavior with no criterion, is a finding.
 2. **Walk the outlier checklist** from section 6 against every public function. Look for the missing guard, not the present one.
-3. **Read every error path to its end.** Where does each `ReadingError` go? What does the caller see? What is logged, and is anything sensitive logged?
+3. **Read every error path to its end.** Where does each `ReadingRejection` and `AppendOutcome` go? What does the caller see? What is logged, and is anything sensitive logged?
 4. **Check the purity boundary.** Search the core for `DateTime.Now`, `DateTimeOffset.UtcNow`, `Guid.NewGuid`, `Random`, mutable static fields, and I/O. Any hit is a design violation. (Static methods and immutable values are fine; hidden state is not.)
 5. **Read the tests as critically as the code.** Confirm assertions are specific, not `Assert.NotNull`. Confirm no test was weakened, skipped, or deleted in the diff.
 6. **Read the pipeline diff.** A removed gate is a removed safeguard.
@@ -933,7 +1252,7 @@ A release is safe when it is small, observable, and reversible in minutes. The p
 
 - **Immutable artifacts.** The exact binary and container image that passed staging is the one promoted to production. Nothing is rebuilt.
 - **Progressive rollout.** Route a small share of traffic to the new version first, compare its error rate and latency against the baseline, then widen. Feature flags separate deploying code from enabling behavior.
-- **Automated rollback.** Define the rollback trigger before the release, in numbers: for example, error rate above baseline or p99 latency above the story's threshold for five minutes. When the trigger fires, rollback happens without a meeting.
+- **Automated rollback.** Define the rollback trigger before the release, in numbers: for example, error rate above baseline or p99 latency above the story's threshold for five minutes. When the trigger fires, rollback happens without a meeting. The canary template in `pipeline-templates/` polls the slot's Azure Monitor alerts while traffic is split, clears routing before it swaps, and sends all traffic back to production if anything fails first.
 - **Backward-compatible data changes.** Use expand and contract migrations, so the previous version can always run against the current schema.
 - **Observability from day one.** Structured logs, distributed traces with OpenTelemetry, and SLO-based alerts ship with the first release, not after the first incident.
 

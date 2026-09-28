@@ -27,8 +27,11 @@
   past when time is not under test.
 - **One Gherkin file.** `docs/stories/1234-sensor-range.feature` is linked into the acceptance test
   project; generated code-behind is ignored by git.
-- **Staging runs the promoted bits.** The Build stage publishes the acceptance test app once, and
-  the staging job runs that artifact.
+- **Staging runs the promoted bits.** The Build stage ships the acceptance suite's Release build
+  output as an artifact, and the staging job runs it directly with xUnit's own options
+  (`-trait- "Category=in-process"`). `dotnet publish` is not used for the test project: it copies
+  netstandard assemblies from the test SDK that redefine `IAsyncDisposable` and break xUnit
+  discovery with a `TypeLoadException`.
 
 ## Consequences
 
