@@ -1,7 +1,11 @@
 # ADR 0001: Write the reading and its event atomically through an outbox
 
-- Status: Accepted
+- Status: Accepted; the failure signal (exception) is superseded by [ADR 0004](0004-store-outcomes-and-dependency-budget.md)
 - Work item: AB#1234 (AC-4)
+
+> **Superseded in part.** The atomic outbox write and the idempotency key still stand. The store no
+> longer throws `StoreUnavailableException`; it returns `AppendOutcome.Unavailable`, and a same-key
+> write with a different value returns `AppendOutcome.Conflict` (AC-8). See ADR 0004.
 
 ## Context
 
