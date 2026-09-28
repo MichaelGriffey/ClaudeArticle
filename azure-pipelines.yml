@@ -12,7 +12,8 @@ resources:
     type: github
     name: contoso/pipeline-templates
     endpoint: github-contoso          # GitHub service connection
-    ref: refs/tags/v3.2.0             # pinned; template changes ship as reviewed releases
+    ref: refs/tags/v3.3.0             # pinned; template changes ship as reviewed releases
+                                      # v3.3.0: appSettings on deploy-api, alert-watching canary with rollback
 
 variables:
   config: Release
@@ -51,6 +52,10 @@ stages:
         dotnet test --project tests/Ingestion.AcceptanceTests -c $(config) --no-build \
           --results-directory $(Agent.TempDirectory)/acceptance --report-xunit-trx
       displayName: Integration and in-process acceptance tests
+    # Staging runs these exact bits (ADR 0006). This is the Release build output, not dotnet publish:
+    # publishing a test project copies netstandard assemblies from the test SDK that break xUnit discovery.
+    - publish: tests/Ingestion.AcceptanceTests/bin/$(config)/net10.0
+      artifact: acceptance-tests
     - task: PublishTestResults@2
       condition: succeededOrFailed()
       inputs:
@@ -80,6 +85,8 @@ stages:
           - template: steps/deploy-api.yml@templates
             parameters:
               package: $(Pipeline.Workspace)/api
+              # No durable store exists yet; staging accepts losing readings on restart (ADR 0004).
+              appSettings: -Storage__Provider InMemory
   - job: Acceptance
     dependsOn: Deploy
     pool:
@@ -90,14 +97,44 @@ stages:
     - task: UseDotNet@2
       inputs:
         useGlobalJson: true
+    - download: current
+      artifact: acceptance-tests
+    # xUnit v3 test projects are executables, so the promoted build runs directly (xUnit's own options).
     - script: >
-        dotnet test --project tests/Ingestion.AcceptanceTests
-        --filter-not-trait "Category=in-process" --report-xunit-trx
+        dotnet Ingestion.AcceptanceTests.dll -trait- "Category=in-process"
+        -result-trx $(Agent.TempDirectory)/acceptance-staging.trx
       displayName: Gherkin acceptance suite against staging
+      workingDirectory: $(Pipeline.Workspace)/acceptance-tests
       env:
         INGESTION_BASE_URL: $(stagingBaseUrl)
         INGESTION_ACCESS_TOKEN: $(stagingAccessToken)   # secret variable in the group
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFormat: VSTest
+        testResultsFiles: $(Agent.TempDirectory)/acceptance-staging.trx
+  - job: LoadTest
+    displayName: p99 under 50 ms at 2,000 requests per second
+    dependsOn: Acceptance
+    pool:
+      vmImage: ubuntu-latest
+    variables:
+    - group: ingestion-staging        # also provides loadTestResource and loadTestResourceGroup
+    steps:
+    - task: AzureLoadTest@1
+      displayName: Azure Load Testing (fails on p99 over 50 ms or errors over 1%)
+      inputs:
+        azureSubscription: $(azureSubscription)
+        loadTestConfigFile: tests/load/ingestion-p99.yaml
+        loadTestResource: $(loadTestResource)
+        resourceGroup: $(loadTestResourceGroup)
+        env: |
+          [ { "name": "INGESTION_BASE_URL", "value": "$(stagingBaseUrl)" } ]
+        secrets: |
+          [ { "name": "INGESTION_ACCESS_TOKEN", "value": "$(stagingAccessToken)" } ]
 
+# Blocked by design until a durable store adapter exists (ADR 0004): production sets no
+# Storage:Provider, so the app refuses to start, the canary's alerts fire, and the canary rolls back.
 - stage: Production
   dependsOn: Staging
   condition: and(succeeded(), eq(variables.isMain, true))

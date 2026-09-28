@@ -1,0 +1,19 @@
+# Azure Load Testing configuration for the non-functional criterion in AB#1234 (ADR 0006):
+# p99 latency under 50 ms at 2,000 requests per second. Run by the staging stage's LoadTest job.
+version: v0.1
+testId: ingestion-p99
+displayName: Ingestion API p99 at 2,000 requests per second
+description: Fails when p99 exceeds 50 ms or more than 1% of requests fail.
+testType: Locust
+testPlan: locustfile.py
+engineInstances: 4
+env:
+  - name: LOCUST_USERS                # each user sends one reading per second
+    value: "2000"
+  - name: LOCUST_SPAWN_RATE
+    value: "200"
+  - name: LOCUST_RUN_TIME
+    value: "5m"
+failureCriteria:
+  - p99(response_time_ms) > 50
+  - percentage(error) > 1

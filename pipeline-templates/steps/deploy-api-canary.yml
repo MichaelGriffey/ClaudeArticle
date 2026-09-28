@@ -1,5 +1,6 @@
 # Example contents of the contoso/pipeline-templates repository (pinned by tag in azure-pipelines.yml).
-# Progressive release: deploy to the canary slot, route a share of traffic, watch, then promote.
+# Progressive release: deploy to the canary slot, route a share of traffic, watch the alerts,
+# then promote. Any failure before the swap rolls back automatically: production never changed.
 parameters:
 - name: package
   type: string
@@ -15,6 +16,9 @@ parameters:
 - name: observeMinutes
   type: number
   default: 15
+- name: checkIntervalSeconds
+  type: number
+  default: 60
 
 steps:
 - template: deploy-api.yml
@@ -36,10 +40,44 @@ steps:
       --resource-group $(resourceGroup)
       --distribution canary=${{ parameters.canaryPercent }}
 
-# While traffic is split, Azure Monitor alerts on error rate and p99 latency are the signal.
-# If they fire, cancel the run and clear routing; nothing has been promoted yet.
-- script: sleep $(( ${{ parameters.observeMinutes }} * 60 ))
-  displayName: Observe canary for ${{ parameters.observeMinutes }} minutes
+# The signal is the Azure Monitor alert rules on the canary slot (error rate, p99 latency, failed
+# health checks). The step polls them instead of sleeping, and a fired alert fails the run, which
+# triggers the rollback below.
+- task: AzureCLI@2
+  displayName: Watch canary alerts for ${{ parameters.observeMinutes }} minutes
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      set -euo pipefail
+      slot_id=$(az webapp show --name "${{ parameters.appName }}" --resource-group "$(resourceGroup)" \
+        --slot canary --query id -o tsv)
+      subscription=$(az account show --query id -o tsv)
+      alerts="https://management.azure.com/subscriptions/${subscription}/providers/Microsoft.AlertsManagement/alerts"
+      deadline=$(( $(date +%s) + ${{ parameters.observeMinutes }} * 60 ))
+      while [ "$(date +%s)" -lt "$deadline" ]; do
+        fired=$(az rest --method get \
+          --url "${alerts}?api-version=2019-05-05-preview&targetResource=${slot_id}&monitorCondition=Fired&timeRange=1h" \
+          --query "length(value)" -o tsv)
+        if [ "$fired" -gt 0 ]; then
+          echo "##vso[task.logissue type=error]${fired} alert(s) fired on the canary slot."
+          exit 1
+        fi
+        sleep ${{ parameters.checkIntervalSeconds }}
+      done
+
+# Stop routing before the swap: after it, the canary slot holds the previous build.
+- task: AzureCLI@2
+  displayName: Clear traffic routing
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: >
+      az webapp traffic-routing clear
+      --name ${{ parameters.appName }}
+      --resource-group $(resourceGroup)
 
 - task: AzureAppServiceManage@0
   displayName: Promote canary to production
@@ -50,8 +88,11 @@ steps:
     ResourceGroupName: $(resourceGroup)
     SourceSlot: canary
 
+# Automatic rollback: a failure before the swap left production untouched, so sending all traffic
+# back to it undoes the canary without a meeting.
 - task: AzureCLI@2
-  displayName: Clear traffic routing
+  displayName: Roll back canary traffic
+  condition: failed()
   inputs:
     azureSubscription: ${{ parameters.azureSubscription }}
     scriptType: bash

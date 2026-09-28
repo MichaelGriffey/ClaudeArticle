@@ -12,6 +12,9 @@ parameters:
 - name: slot
   type: string
   default: staging
+- name: appSettings
+  type: string
+  default: ''                         # App Service syntax: -Key1 value1 -Key2 value2
 
 steps:
 - task: AzureWebApp@1
@@ -24,3 +27,4 @@ steps:
     resourceGroupName: $(resourceGroup)
     slotName: ${{ parameters.slot }}
     package: ${{ parameters.package }}
+    appSettings: ${{ parameters.appSettings }}
