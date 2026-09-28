@@ -1,10 +1,10 @@
 # azure-pipelines.yml (checked into the GitHub repo, reviewed like code)
 trigger:
   branches:
-    include: [ main ]
+    include: [ master ]
 pr:
   branches:
-    include: [ main ]
+    include: [ master ]
 
 resources:
   repositories:
@@ -17,7 +17,7 @@ resources:
 
 variables:
   config: Release
-  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/master')]
 
 stages:
 - stage: Build
