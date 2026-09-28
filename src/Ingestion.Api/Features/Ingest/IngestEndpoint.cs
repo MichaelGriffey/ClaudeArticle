@@ -66,10 +66,10 @@ public static class IngestEndpoint
             return TypedResults.NotFound();
 
         var outcome = RangeClassifier.Classify(
-            request.Value, sensor.Limits, request.ObservedAt, clock.GetUtcNow(), policy);
+            new Reading(request.Value, request.ObservedAt), sensor.Limits, policy, clock.GetUtcNow());
 
-        if (!outcome.TryGetValue(out var classification, out var error))
-            return ToProblem(error);
+        if (!outcome.TryGetValue(out var classification, out var rejection))
+            return ToProblem(rejection);
 
         try
         {
@@ -85,10 +85,10 @@ public static class IngestEndpoint
         }
     }
 
-    private static ProblemHttpResult ToProblem(ReadingError error) => error switch
+    private static ProblemHttpResult ToProblem(ReadingRejection rejection) => rejection switch
     {
-        ReadingError.NonFiniteValue or ReadingError.FutureTimestamp or ReadingError.StaleReading =>
-            TypedResults.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: error.Code),
-        _ => throw new UnreachableException($"Classifier returned unmapped error '{error.Code}'."),
+        ReadingRejection.NonFiniteValue or ReadingRejection.FutureTimestamp or ReadingRejection.StaleReading =>
+            TypedResults.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: rejection.Code),
+        _ => throw new UnreachableException($"Unmapped rejection '{rejection.Code}'."),
     };
 }

@@ -16,7 +16,7 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 builder.Services.AddProblemDetails();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(
-    FreshnessPolicy.Create(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(2))
+    FreshnessPolicy.Create(FreshnessRequirements.MaxAge, FreshnessRequirements.MaxSkew)
         .Match(p => p, e => throw new InvalidOperationException($"Invalid freshness policy: {e}")));
 
 // Authentication (for example, Microsoft Entra ID bearer tokens) is registered per environment.

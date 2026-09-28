@@ -1,64 +1,31 @@
 namespace Ingestion.Domain;
 
+/// <summary>Ordered from lowest to highest, so a higher reading never gets a lower classification.</summary>
 public enum Classification { Low, Nominal, High }
 
-public abstract record ReadingError(string Code)
-{
-    public sealed record NonFiniteValue() : ReadingError("NonFiniteValue");
-    public sealed record InvalidLimits(double Lower, double Upper) : ReadingError("InvalidLimits");
-    public sealed record InvalidPolicy(TimeSpan MaxAge, TimeSpan MaxSkew) : ReadingError("InvalidPolicy");
-    public sealed record FutureTimestamp(TimeSpan Skew) : ReadingError("FutureTimestamp");
-    public sealed record StaleReading(TimeSpan Age) : ReadingError("StaleReading");
-}
-
-/// <summary>Calibrated limits. The only way to get one is valid: finite and ordered.</summary>
-public sealed record Limits
-{
-    private Limits(double lower, double upper) => (Lower, Upper) = (lower, upper);
-
-    public double Lower { get; }
-    public double Upper { get; }
-
-    public static Result<Limits, ReadingError> Create(double lower, double upper) =>
-        double.IsFinite(lower) && double.IsFinite(upper) && lower <= upper
-            ? new Limits(lower, upper)
-            : new ReadingError.InvalidLimits(lower, upper);
-}
-
-/// <summary>How old a reading may be, and how far ahead of our clock it may claim to be.</summary>
-public sealed record FreshnessPolicy
-{
-    private FreshnessPolicy(TimeSpan maxAge, TimeSpan maxSkew) => (MaxAge, MaxSkew) = (maxAge, maxSkew);
-
-    public TimeSpan MaxAge { get; }
-    public TimeSpan MaxSkew { get; }
-
-    public static Result<FreshnessPolicy, ReadingError> Create(TimeSpan maxAge, TimeSpan maxSkew) =>
-        maxAge > TimeSpan.Zero && maxSkew >= TimeSpan.Zero
-            ? new FreshnessPolicy(maxAge, maxSkew)
-            : new ReadingError.InvalidPolicy(maxAge, maxSkew);
-}
+/// <summary>A sensor value as observed. Not validated: deciding whether it is acceptable is the classifier's job.</summary>
+public readonly record struct Reading(double Value, DateTimeOffset ObservedAt);
 
 public static class RangeClassifier
 {
     // Pure: same inputs, same output. No clock, no I/O, no expected-failure exceptions.
-    public static Result<Classification, ReadingError> Classify(
-        double value, Limits limits, DateTimeOffset observedAt,
-        DateTimeOffset now, FreshnessPolicy policy)
+    public static Result<Classification, ReadingRejection> Classify(
+        Reading reading, Limits limits, FreshnessPolicy policy, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(limits);   // a null here is a defect, not an input
         ArgumentNullException.ThrowIfNull(policy);
 
-        if (!double.IsFinite(value))
-            return new ReadingError.NonFiniteValue();                  // AC-2
+        // Value before time (AC-11).
+        if (!double.IsFinite(reading.Value))
+            return new ReadingRejection.NonFiniteValue();                                     // AC-2
 
-        var age = now - observedAt;
-        if (age < -policy.MaxSkew) return new ReadingError.FutureTimestamp(-age);  // AC-5
-        if (age > policy.MaxAge) return new ReadingError.StaleReading(age);      // AC-5
+        var age = now - reading.ObservedAt;
+        if (age < -policy.MaxSkew) return new ReadingRejection.FutureTimestamp(-age, policy.MaxSkew);  // AC-5
+        if (age > policy.MaxAge) return new ReadingRejection.StaleReading(age, policy.MaxAge);         // AC-5
 
         // Limits are inclusive (AC-1).
-        return value < limits.Lower ? Classification.Low
-             : value > limits.Upper ? Classification.High
+        return reading.Value < limits.Lower ? Classification.Low
+             : reading.Value > limits.Upper ? Classification.High
              : Classification.Nominal;
     }
 }

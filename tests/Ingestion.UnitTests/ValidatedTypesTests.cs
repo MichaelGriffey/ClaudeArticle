@@ -17,7 +17,7 @@ public sealed class ValidatedTypesTests
     [InlineData(0.0, double.PositiveInfinity)]
     [InlineData(2.0, 1.0)]                                     // unordered
     public void Limits_reject_non_finite_or_unordered_bounds(double lower, double upper) =>
-        Assert.IsType<ReadingError.InvalidLimits>(Limits.Create(lower, upper).ShouldFail());
+        Assert.IsType<ConfigurationError.InvalidLimits>(Limits.Create(lower, upper).ShouldFail());
 
     [Theory]
     [InlineData(-40.0, 125.0)]
@@ -33,8 +33,15 @@ public sealed class ValidatedTypesTests
     [InlineData(-1, 0)]
     [InlineData(300, -1)]                                      // skew cannot be negative
     public void Freshness_policy_rejects_invalid_windows(int maxAgeSeconds, int maxSkewSeconds) =>
-        Assert.IsType<ReadingError.InvalidPolicy>(
+        Assert.IsType<ConfigurationError.InvalidPolicy>(
             FreshnessPolicy.Create(TimeSpan.FromSeconds(maxAgeSeconds), TimeSpan.FromSeconds(maxSkewSeconds)).ShouldFail());
+
+    [Fact]
+    public void Configuration_error_codes_are_stable()
+    {
+        Assert.Equal("InvalidLimits", new ConfigurationError.InvalidLimits(0, 0).Code);
+        Assert.Equal("InvalidPolicy", new ConfigurationError.InvalidPolicy(TimeSpan.Zero, TimeSpan.Zero).Code);
+    }
 
     [Theory]
     [InlineData(300, 0)]                                       // zero skew is allowed
@@ -75,9 +82,10 @@ public sealed class ValidatedTypesTests
         var limits = Limits.Create(0, 1).ShouldSucceed();
         var policy = FreshnessPolicy.Create(TimeSpan.FromMinutes(1), TimeSpan.Zero).ShouldSucceed();
         var t = DateTimeOffset.UnixEpoch;
+        var reading = new Reading(0, t);
 
-        Assert.Throws<ArgumentNullException>(() => RangeClassifier.Classify(0, null!, t, t, policy));
-        Assert.Throws<ArgumentNullException>(() => RangeClassifier.Classify(0, limits, t, t, null!));
+        Assert.Throws<ArgumentNullException>(() => RangeClassifier.Classify(reading, null!, policy, t));
+        Assert.Throws<ArgumentNullException>(() => RangeClassifier.Classify(reading, limits, null!, t));
     }
 
     [Fact]
