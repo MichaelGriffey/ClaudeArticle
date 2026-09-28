@@ -1,44 +1,19 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
-using System.Text;
-using System.Text.Json;
 using Ingestion.Api.Features.Ingest;
 using Ingestion.Testing;
 using Xunit;
+using static Ingestion.IntegrationTests.Problems;
 
 namespace Ingestion.IntegrationTests;
 
-/// <summary>The imperative shell against the real pipeline: routing, auth, JSON, status codes.</summary>
+/// <summary>The imperative shell against the real pipeline: validation, JSON, status codes, persistence.</summary>
 public sealed class IngestEndpointTests
 {
     private static readonly Uri Url = new("/sensors/TMP-07/readings", UriKind.Relative);
     private static readonly DateTimeOffset Now = IngestionApi.DefaultStart;
     private static readonly string NowIso = Now.ToString("O", CultureInfo.InvariantCulture);
-    private static CancellationToken Ct => TestContext.Current.CancellationToken;
-
-    [Fact]
-    public async Task Anonymous_callers_get_401()
-    {
-        await using var api = new IngestionApi();
-        using var client = api.CreateClient();
-
-        using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
-
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        Assert.Equal(0, api.Store.AppendCalls);
-    }
-
-    [Fact]
-    public async Task Callers_without_the_write_scope_get_403()
-    {
-        await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope("readings:read");
-
-        using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
-
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-    }
 
     [Fact]
     public async Task A_reading_at_the_upper_limit_is_classified_nominal_and_persisted()   // AC-1
@@ -49,8 +24,8 @@ public sealed class IngestEndpointTests
         using var response = await client.PostAsJsonAsync(Url, new { value = 125.0, observedAt = Now }, Ct);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
-        Assert.Equal("Nominal", body.RootElement.GetProperty("classification").GetString());
+        var body = await ReadJsonAsync(response);
+        Assert.Equal("Nominal", body.GetProperty("classification").GetString());
         Assert.Single(api.Store.Rows);
     }
 
@@ -62,22 +37,10 @@ public sealed class IngestEndpointTests
         await using var api = new IngestionApi();
         using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
 
-        using var response = await PostRawAsync(client, $$"""{"value":{{jsonValue}},"observedAt":"{{NowIso}}"}""");
+        using var response = await client.PostRawAsync(Url, $$"""{"value":{{jsonValue}},"observedAt":"{{NowIso}}"}""");
 
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
-        Assert.Equal("NonFiniteValue", await ProblemTitleAsync(response));
+        await AssertProblemAsync(response, HttpStatusCode.UnprocessableEntity, "NonFiniteValue");
         Assert.Equal(0, api.Store.AppendCalls);
-    }
-
-    [Fact]
-    public async Task A_bare_NaN_token_is_invalid_json_and_gets_400()
-    {
-        await using var api = new IngestionApi();
-        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
-
-        using var response = await PostRawAsync(client, $$"""{"value":NaN,"observedAt":"{{NowIso}}"}""");
-
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
@@ -104,28 +67,91 @@ public sealed class IngestEndpointTests
 
         using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now }, Ct);
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        await AssertProblemAsync(response, HttpStatusCode.ServiceUnavailable, "EventStoreUnavailable");
         Assert.Equal(TimeSpan.FromSeconds(5), response.Headers.RetryAfter?.Delta);
         Assert.Empty(api.Store.Rows);
     }
 
-    [Theory]
-    [InlineData(-301, "StaleReading")]
-    [InlineData(3, "FutureTimestamp")]
-    public async Task Readings_outside_the_freshness_window_get_422(int offsetSeconds, string expectedError)   // AC-5
+    [Fact]
+    public async Task A_stale_reading_gets_422_with_its_age_and_the_limit()                   // AC-5
     {
         await using var api = new IngestionApi();
         using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
 
-        using var response = await client.PostAsJsonAsync(
-            Url, new { value = 20.0, observedAt = Now.AddSeconds(offsetSeconds) }, Ct);
+        using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now.AddSeconds(-301) }, Ct);
 
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
-        Assert.Equal(expectedError, await ProblemTitleAsync(response));
+        var problem = await AssertProblemAsync(response, HttpStatusCode.UnprocessableEntity, "StaleReading");
+        Assert.Equal(301, problem.GetProperty("ageSeconds").GetDouble());
+        Assert.Equal(300, problem.GetProperty("maxAgeSeconds").GetDouble());
+        Assert.Equal("The reading is 301 s old; the limit is 300 s.", problem.GetProperty("detail").GetString());
     }
 
     [Fact]
-    public async Task An_unknown_sensor_gets_404()
+    public async Task A_future_reading_gets_422_with_its_skew_and_the_limit()                 // AC-5
+    {
+        await using var api = new IngestionApi();
+        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+
+        using var response = await client.PostAsJsonAsync(Url, new { value = 20.0, observedAt = Now.AddSeconds(3) }, Ct);
+
+        var problem = await AssertProblemAsync(response, HttpStatusCode.UnprocessableEntity, "FutureTimestamp");
+        Assert.Equal(3, problem.GetProperty("skewSeconds").GetDouble());
+        Assert.Equal(2, problem.GetProperty("maxSkewSeconds").GetDouble());
+    }
+
+    [Theory]
+    [InlineData("""{"observedAt":"2026-09-27T14:00:00Z"}""", new[] { "value" })]
+    [InlineData("""{"value":null,"observedAt":"2026-09-27T14:00:00Z"}""", new[] { "value" })]
+    [InlineData("""{"value":20.0}""", new[] { "observedAt" })]
+    [InlineData("""{"value":20.0,"observedAt":null}""", new[] { "observedAt" })]
+    [InlineData("""{}""", new[] { "value", "observedAt" })]
+    public async Task Missing_fields_get_400_naming_each_field(string json, string[] fields)  // AC-6
+    {
+        await using var api = new IngestionApi();
+        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+
+        using var response = await client.PostRawAsync(Url, json);
+
+        var problem = await AssertProblemAsync(response, HttpStatusCode.BadRequest, "InvalidRequest");
+        Assert.Equal(
+            fields.Order(StringComparer.Ordinal),
+            problem.GetProperty("errors").EnumerateObject().Select(e => e.Name).Order(StringComparer.Ordinal));
+        Assert.Equal(0, api.Store.AppendCalls);
+    }
+
+    [Theory]
+    [InlineData("2026-09-27T14:00:00")]                        // no offset: ambiguous
+    [InlineData("2026-09-27 14:00:00Z")]                       // not ISO 8601
+    [InlineData("2026-02-30T14:00:00Z")]                       // no such date
+    [InlineData("27/09/2026 14:00:00 +00:00")]
+    public async Task A_timestamp_without_an_explicit_offset_gets_400(string observedAt)      // AC-7
+    {
+        await using var api = new IngestionApi();
+        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+
+        using var response = await client.PostRawAsync(Url, $$"""{"value":20.0,"observedAt":"{{observedAt}}"}""");
+
+        var problem = await AssertProblemAsync(response, HttpStatusCode.BadRequest, "InvalidRequest");
+        Assert.True(problem.GetProperty("errors").TryGetProperty("observedAt", out _));
+        Assert.Equal(0, api.Store.AppendCalls);
+    }
+
+    [Theory]
+    [InlineData("2026-09-27T14:00:00Z")]
+    [InlineData("2026-09-27T09:00:00-05:00")]                  // the same instant, another offset
+    [InlineData("2026-09-27T14:00:00.1234567+00:00")]
+    public async Task A_timestamp_with_an_explicit_offset_is_accepted(string observedAt)      // AC-7
+    {
+        await using var api = new IngestionApi();
+        using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
+
+        using var response = await client.PostRawAsync(Url, $$"""{"value":20.0,"observedAt":"{{observedAt}}"}""");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task An_unknown_sensor_gets_404_and_persists_nothing()                        // AC-12
     {
         await using var api = new IngestionApi();
         using var client = api.CreateClientWithScope(IngestEndpoint.WritePolicy);
@@ -133,18 +159,7 @@ public sealed class IngestEndpointTests
         using var response = await client.PostAsJsonAsync(
             new Uri("/sensors/NOPE-01/readings", UriKind.Relative), new { value = 20.0, observedAt = Now }, Ct);
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-    }
-
-    private static async Task<HttpResponseMessage> PostRawAsync(HttpClient client, string json)
-    {
-        using var content = new StringContent(json, Encoding.UTF8, "application/json");
-        return await client.PostAsync(Url, content, Ct);
-    }
-
-    private static async Task<string?> ProblemTitleAsync(HttpResponseMessage response)
-    {
-        using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
-        return problem.RootElement.GetProperty("title").GetString();
+        await AssertProblemAsync(response, HttpStatusCode.NotFound, "SensorNotFound");
+        Assert.Equal(0, api.Store.AppendCalls);
     }
 }

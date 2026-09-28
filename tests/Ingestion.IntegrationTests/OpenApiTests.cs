@@ -36,6 +36,11 @@ public sealed class OpenApiTests
         var responses = post.GetProperty("responses");
         foreach (var status in new[] { "200", "400", "401", "403", "404", "422", "503" })
             Assert.True(responses.TryGetProperty(status, out _), $"Response {status} is not documented.");
+
+        // observedAt is text on the wire (AC-7) but documented as a required date-time.
+        var request = root.GetProperty("components").GetProperty("schemas").GetProperty("IngestReadingRequest");
+        Assert.Equal("date-time", request.GetProperty("properties").GetProperty("observedAt").GetProperty("format").GetString());
+        Assert.Equal(["value", "observedAt"], request.GetProperty("required").EnumerateArray().Select(e => e.GetString()));
     }
 
     [Fact]

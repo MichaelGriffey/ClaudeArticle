@@ -4,7 +4,7 @@ using Ingestion.Api.Features.Ingest;
 namespace Ingestion.Testing;
 
 /// <summary>
-/// Store double that honors the idempotency contract and can simulate an outage.
+/// Store double that honors the idempotency contract and can simulate an outage or a defect.
 /// <see cref="AppendCalls"/> counts attempts; <see cref="Rows"/> holds what was persisted.
 /// </summary>
 public sealed class FakeReadingStore : IReadingStore
@@ -13,6 +13,10 @@ public sealed class FakeReadingStore : IReadingStore
     private int _appendCalls;
 
     public bool IsUnavailable { get; set; }
+
+    /// <summary>When set, every append throws it: an unexpected failure, not an outage.</summary>
+    public Exception? Fault { get; set; }
+
     public int AppendCalls => Volatile.Read(ref _appendCalls);
     public IReadOnlyCollection<ClassifiedReading> Rows => [.. _rows.Values];
 
@@ -21,6 +25,8 @@ public sealed class FakeReadingStore : IReadingStore
         ArgumentNullException.ThrowIfNull(reading);
         Interlocked.Increment(ref _appendCalls);
 
+        if (Fault is not null)
+            throw Fault;
         if (IsUnavailable)
             throw new StoreUnavailableException("Simulated outage.", new TimeoutException());
 

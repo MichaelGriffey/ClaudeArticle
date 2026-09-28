@@ -51,9 +51,24 @@ builder.Services.AddOpenApi(o =>
         return Task.CompletedTask;
     });
     o.AddOperationTransformer<BearerSecurityOperationTransformer>();
+
+    // observedAt is text on the wire (AC-7) but documented as a date-time, so Swagger UI proposes one.
+    o.AddSchemaTransformer((schema, context, _) =>
+    {
+        if (context.JsonPropertyInfo is { Name: "observedAt" } property
+            && property.DeclaringType == typeof(IngestReadingRequest))
+        {
+            schema.Format = "date-time";
+        }
+        return Task.CompletedTask;
+    });
 });
 
 var app = builder.Build();
+
+// Every error is problem details (ADR 0002). These wrap authentication so 401 and 403 get a body too.
+app.UseExceptionHandler();   // unexpected exceptions: 500 without exception text, logged on the server
+app.UseStatusCodePages();    // empty 4xx bodies (401, 403, 415, unknown routes) become problem details
 
 if (app.Environment.IsDevelopment())
 {
@@ -68,6 +83,9 @@ if (app.Environment.IsDevelopment())
     });
     app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 }
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapIngestReadings();
 await app.RunAsync();
