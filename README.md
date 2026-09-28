@@ -104,6 +104,9 @@ Invoke-RestMethod -Method Post -Uri http://localhost:5099/sensors/TMP-07/reading
 - Meter `Ingestion.Api`: `ingestion.readings.accepted` (by classification), `ingestion.readings.rejected`
   (by code), and `ingestion.store.append.duration` (by outcome).
 - Logs carry the sensor ID and error code, never reading values or tokens.
+- Each accepted reading has one audit record: the caller's token IDs (`oid`/`sub`, `azp`, `tid`), the
+  action, the sensor and observation time, the server time, and the trace ID (ADR 0008). Tokens without
+  a `sub` claim cannot write.
 
 ## Where each article section lives
 
@@ -124,7 +127,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:5099/sensors/TMP-07/reading
 | Project | What it proves | Runs against |
 | --- | --- | --- |
 | `Ingestion.UnitTests` | Every rule and boundary in the core; FsCheck properties for NaN and monotonicity; mutation score 100% | Pure functions |
-| `Ingestion.IntegrationTests` | Validation, problem details for every status, authorization by scope and app role, idempotency and conflicts, the dependency budget, startup refusals, health and metrics, OpenAPI document and Swagger UI | In-memory host (`Ingestion.Testing`) |
+| `Ingestion.IntegrationTests` | Validation, problem details for every status, authorization by scope and app role, idempotency and conflicts, the dependency budget, the audit trail, startup refusals, health and metrics, OpenAPI document and Swagger UI | In-memory host (`Ingestion.Testing`) |
 | `Ingestion.AcceptanceTests` | The Gherkin story (`docs/stories/`, linked in), scenario by scenario | In-memory host, or a deployed environment when `INGESTION_BASE_URL` is set |
 | `tests/load` | p99 under 50 ms at 2,000 requests per second | Staging, through Azure Load Testing |
 
@@ -155,8 +158,10 @@ survived. `tests/Ingestion.UnitTests/stryker-config.json` selects the MTP runner
 
 - **No durable store.** Production refuses to start by design until a database adapter with an outbox
   exists (ADR 0004). That work item also decides timestamp precision (see the story's open questions).
-- **Audit events.** `.claude/rules/api-security.md` asks for an audit event on every state change (who,
-  what, when, correlation ID). Accepted readings are not audited yet; that needs a decision on the
-  audit sink and data classification.
+- **Audit delivery.** Every accepted reading already produces an audit record in the same write as the
+  reading (ADR 0008, AC-13). Shipping records onward (outbox relay, Event Hubs, immutable Blob Storage
+  for 30 months, the Sentinel workspace for 2-minute search) arrives with the durable store. Confirm
+  the 30-month retention with compliance before locking the immutability policy: a locked policy can
+  be extended but never shortened.
 - **Placeholders.** Commits reference `AB#TBD`, and error `type` URLs use
   `https://docs.contoso.com/ingestion/errors/` until a docs site exists.

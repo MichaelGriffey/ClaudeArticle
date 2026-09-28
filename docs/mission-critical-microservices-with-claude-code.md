@@ -80,7 +80,7 @@ non-functional criteria with measurable thresholds.
 
 The questions Claude returns are the real value. Typical ones: What happens when a reading is exactly on the threshold? Are readings idempotent by sensor and timestamp? What is the behavior when the downstream store is unavailable? Is NaN a reading or an error? Each answer becomes a criterion.
 
-The resulting story reads like this. Each criterion carries a tag (`@AC-1` through `@AC-12`) that tests, code comments, and review findings cite, which makes traceability searchable. The first five came from planning. The other seven came from an architecture review, each one a question the code had been answering by accident: what a missing field means, which time zone a bare timestamp is in, what a same-key reading with a different value does, and how long a dependency may take.
+The resulting story reads like this. Each criterion carries a tag (`@AC-1` through `@AC-13`) that tests, code comments, and review findings cite, which makes traceability searchable. The first five came from planning. The rest came from an architecture review, each one a question the code had been answering by accident, or not at all: what a missing field means, which time zone a bare timestamp is in, what a same-key reading with a different value does, how long a dependency may take, and who is accountable for each accepted reading.
 
 ```gherkin
 Feature: Out-of-range sensor reading detection
@@ -189,6 +189,12 @@ Feature: Out-of-range sensor reading detection
   Scenario: A reading for an unregistered sensor is rejected
     When a reading for sensor "NOPE-01" is received
     Then the reading is rejected with status 404 and code "SensorNotFound"
+
+  @AC-13 @in-process
+  Scenario: An accepted reading is audited once, and its repeat is not
+    Given a reading for "TMP-07" was accepted
+    When a reading with the same sensor and timestamp arrives again
+    Then exactly one audit record names the caller and the reading
 ```
 
 The two AC-5 outlines are deliberate. Exact boundaries belong where the clock is controlled; against a deployed service, a 1-second margin measured across two machines' clocks and a network hop fails at random, so the staging run checks readings far outside the window instead.
@@ -666,12 +672,13 @@ public interface ISensorRegistry
 public interface IReadingStore
 {
     /// <summary>
-    /// Writes the reading and its outbox event in one transaction (ADR 0001), keyed on
-    /// (SensorId, ObservedAt). Expected outcomes are values, including an outage (ADR 0004);
-    /// an exception means a defect. Resolve a write against the stored row with
+    /// Writes the reading, its outbox event, and its <paramref name="audit"/> entry in one
+    /// transaction (ADR 0001, ADR 0008), keyed on (SensorId, ObservedAt). The audit entry is written
+    /// only when the reading is inserted. Expected outcomes are values, including an outage
+    /// (ADR 0004); an exception means a defect. Resolve a write against the stored row with
     /// <see cref="AppendOutcome.Of"/> so every adapter applies the same idempotency rule.
     /// </summary>
-    Task<AppendOutcome> AppendAsync(ClassifiedReading reading, CancellationToken ct);
+    Task<AppendOutcome> AppendAsync(ClassifiedReading reading, AuditEntry audit, CancellationToken ct);
 }
 
 /// <summary>What the store did with a reading. Closed: the private constructor admits only the nested cases.</summary>
@@ -754,17 +761,17 @@ public static class IngestEndpoint
         [FromRoute] string sensorId,
         [FromBody] IngestReadingRequest request,
         [AsParameters] Services services,
-        HttpResponse response,
+        HttpContext context,
         CancellationToken ct)
     {
-        var result = await IngestAsync(sensorId, request, services, response, ct);
+        var result = await IngestAsync(sensorId, request, services, context, ct);
         services.Telemetry.Record(sensorId, result.Result);
         return result;
     }
 
     // Imperative shell: validate, load, call the pure core, persist, translate. No rules here.
     private static async Task<Results<Ok<IngestReadingResponse>, ValidationProblem, ProblemHttpResult>> IngestAsync(
-        string sensorId, IngestReadingRequest request, Services services, HttpResponse response, CancellationToken ct)
+        string sensorId, IngestReadingRequest request, Services services, HttpContext context, CancellationToken ct)
     {
         if (!request.Validate().TryGetValue(out var reading, out var invalid))
             return IngestProblems.InvalidRequest(invalid);                                    // AC-6, AC-7
@@ -785,9 +792,12 @@ public static class IngestEndpoint
                 return IngestProblems.Rejected(rejection);                                    // AC-2, AC-5, AC-11
 
             // The registry's ID, not the route's: a case-insensitive registry must not split the idempotency key.
+            // The store keeps the audit entry only if this write inserts the reading (AC-13).
+            var audit = AuditEntry.ForAcceptedReading(
+                context.User, sensor.Id, reading.ObservedAt, services.Clock.GetUtcNow(), CorrelationId(context));
             var started = services.Clock.GetTimestamp();
             var appended = await services.Store.AppendAsync(
-                new ClassifiedReading(sensor.Id, reading.Value, reading.ObservedAt, classification), deadline.Token);
+                new ClassifiedReading(sensor.Id, reading.Value, reading.ObservedAt, classification), audit, deadline.Token);
             services.Telemetry.StoreAnswered(appended, services.Clock.GetElapsedTime(started));
 
             return appended switch
@@ -796,15 +806,19 @@ public static class IngestEndpoint
                 AppendOutcome.Duplicate duplicate =>
                     TypedResults.Ok(new IngestReadingResponse(duplicate.StoredClassification)),   // AC-3
                 AppendOutcome.Conflict => IngestProblems.ConflictingReading(),                  // AC-8
-                AppendOutcome.Unavailable => IngestProblems.StoreUnavailable(response, options.RetryAfter),  // AC-4
+                AppendOutcome.Unavailable => IngestProblems.StoreUnavailable(context.Response, options.RetryAfter),  // AC-4
                 _ => throw new UnreachableException($"Unmapped append outcome '{appended}'."),
             };
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)
         {
-            return IngestProblems.DependencyTimeout(response, options.RetryAfter);            // AC-9
+            return IngestProblems.DependencyTimeout(context.Response, options.RetryAfter);    // AC-9
         }
     }
+
+    /// <summary>The W3C trace ID, the same one problem details, logs, and traces carry (ADR 0008).</summary>
+    private static string CorrelationId(HttpContext context) =>
+        Activity.Current?.TraceId.ToHexString() ?? context.TraceIdentifier;
 
     private static string Describe(FreshnessPolicy policy) =>
         "Limits are inclusive (AC-1). Non-finite values are rejected (AC-2); send them as the strings " +
@@ -820,6 +834,8 @@ public static class IngestEndpoint
         string.Create(CultureInfo.InvariantCulture, $"{amount:0.###} {unit}{(amount == 1 ? "" : "s")}");
 }
 ```
+
+The audit entry travels with the write for a reason. A security rule that says "every state change emits an audit event" is only true if no state change can happen without one, and a log line sent after the commit can be lost to a crash. So the store writes the entry in the same transaction as the reading, and only when the reading is inserted. The entry names the caller by the IDs in its token (subject, client app, tenant), never by name, and records the reading's key rather than its value. Its ID is derived from that key, so every redelivered copy deduplicates downstream (ADR 0008).
 
 `IngestProblems` turns each outcome into RFC 9457 problem details with a stable `code`, a `type` URL, a human `detail`, and the numbers behind a rejection (`ageSeconds`, `maxAgeSeconds`), and it never echoes request values (ADR 0002). The exception handler and status code pages give the framework's own errors (400, 401, 403, 415, 500) the same shape, and a 500 carries no exception text.
 

@@ -29,6 +29,9 @@ Match their shape. Decisions behind it: `docs/adr/0002` to `0007`.
   timeouts map to 503 with `Retry-After`.
 - Record logs and metrics from the returned result (see `IngestTelemetry`). Log IDs and codes,
   never values or tokens.
+- Every state change passes an audit entry to the port, which writes it in the same transaction
+  (see `AuditEntry`, ADR 0008): caller IDs from the token, the key of what changed, server time,
+  trace ID. No names, no values.
 
 ## Tests
 - Unit: one theory per criterion, boundaries from the Gherkin examples, plus FsCheck properties
